@@ -1,5 +1,3 @@
-"""Build SRL step-wise training data from teacher trajectories."""
-
 import json
 import re
 from pathlib import Path
@@ -45,37 +43,23 @@ def _is_step_boundary(line: str) -> bool:
     """
     Detect if a line looks like the start of a new reasoning step.
     
-    Patterns detected (robust for s1K/R1 datasets):
-    - Markdown headers: "#### 1.", "## 2:", "# Step 3"
-    - Bold step markers: "**Step 1**", "**1. Title**"
-    - Plain markers: "Step 1:", "1.", "First,"
+    Patterns detected:
+    - "Step 1:", "Step 2:", etc.
+    - "1.", "2.", "3.", etc. (any number followed by period)
+    - "First,", "Second,", "Third,", etc.
+    - Lines starting with common step indicators
     """
-    line_stripped = line.strip()
-    line_lower = line_stripped.lower()
+    line_lower = line.lower().strip()
     
-    # Compiled patterns for robust step detection
-    step_patterns = [
-        # Markdown headers with numbers: #### 1., ## 2:, # Step 3
-        r'^#{1,4}\s*\d+[.:]',
-        r'^#{1,4}\s*step\s*\d+',
-        # Bold step markers: **Step 1**, **Step 1:**
-        r'^\*\*step\s*\d+\*\*',
-        r'^\*\*step\s*\d+[.:]\*\*',
-        # Bold numbered: **1.**, **1. Title**
-        r'^\*\*\d+\.\s*',
-        r'^\*\*\d+\*\*',
-        # Plain step markers: Step 1:, Step 1.
-        r'^step\s+\d+[.:]',
-        # Plain numbered: 1., 2., 10.
-        r'^\d+\.\s',
-    ]
+    # Pattern: "Step N:" or "Step N."
+    if re.match(r'^step\s+\d+[.:]', line_lower):
+        return True
     
-    # Check all patterns
-    for pattern in step_patterns:
-        if re.match(pattern, line_lower):
-            return True
+    # Pattern: "N." where N is a number (e.g., "1.", "2.", "10.")
+    if re.match(r'^\d+\.\s', line):
+        return True
     
-    # Ordinal patterns: "First,", "Second.", etc.
+    # Pattern: "First,", "Second,", "Third,", etc.
     ordinal_patterns = ['first', 'second', 'third', 'fourth', 'fifth', 
                        'sixth', 'seventh', 'eighth', 'ninth', 'tenth']
     if any(line_lower.startswith(ord + ',') or line_lower.startswith(ord + '.') 
@@ -83,63 +67,6 @@ def _is_step_boundary(line: str) -> bool:
         return True
     
     return False
-
-
-def split_step_title_body(step: str) -> tuple:
-    """
-    Split a step into its title and body components.
-    
-    The title is typically the first line or a bolded header that identifies
-    the step (e.g., "2. **Coprime Pairs**" or "Step 3: Calculate the sum").
-    The body contains the actual reasoning content.
-    
-    This supports the paper's "Step Title Context Injection" where providing
-    the subsequent step title as additional context boosts performance.
-    
-    Args:
-        step: The full step text.
-        
-    Returns:
-        A tuple (title, body) where:
-        - title: The step header/identifier (first line or bolded header)
-        - body: The remaining content (thinking + action)
-    """
-    if not step or not step.strip():
-        return ("", "")
-    
-    lines = step.strip().split('\n')
-    
-    if len(lines) == 1:
-        # Single line step: the whole thing is both title and body
-        return (lines[0].strip(), lines[0].strip())
-    
-    # First line is typically the title
-    first_line = lines[0].strip()
-    
-    # Check if first line looks like a step header
-    # Patterns: "1.", "Step 1:", "**Step 1**", "#### 1.", "1. **Title**"
-    title_patterns = [
-        r'^#{1,4}\s*\d+',           # Markdown headers
-        r'^\*\*.*\*\*\s*$',         # Full bold line
-        r'^step\s*\d+',             # Step N
-        r'^\d+\.\s*\*\*',           # 1. **Title**
-        r'^\d+\.',                  # 1.
-    ]
-    
-    is_title_line = any(re.match(p, first_line.lower()) for p in title_patterns)
-    
-    if is_title_line:
-        title = first_line
-        body = '\n'.join(lines[1:]).strip()
-        # If body is empty, use the title as body too
-        if not body:
-            body = title
-    else:
-        # First line doesn't look like a title, use it as both
-        title = first_line
-        body = step.strip()
-    
-    return (title, body)
 
 
 def normalize_trajectory(row: Dict, idx: int) -> Optional[Dict]:
@@ -253,28 +180,28 @@ def build_srl_examples(traj: Dict) -> Iterable[Dict]:
 
     This is the core SRL transformation: for each step k in the trajectory,
     we create an example where:
-      - State (input): problem + previous steps [S1, ..., S_k] + current step title
-      - Action (target): the current step body (thinking + action)
+      - State (input): problem + previous steps [S1, ..., S_k]
+      - Action (target): the k-th step S_{k+1}
 
-    The Step Title Context Injection (per paper Footnote 1) provides the
-    subsequent step title as additional context to boost performance.
+    This corresponds to the SRL idea where the student model sees the problem
+    and all previous reasoning steps, then must predict the next step. The
+    teacher's step serves as the target label for supervised learning.
 
     Given one normalized trajectory:
         { "id": ..., "problem": ..., "steps": [S1, S2, ..., SN] }
 
     This produces N examples (one for each step):
 
-      k = 0: previous_steps = [],        step_title = title(S1), step_body = body(S1)
-      k = 1: previous_steps = [S1],      step_title = title(S2), step_body = body(S2)
+      k = 0: previous_steps = [],        teacher_step = S1
+      k = 1: previous_steps = [S1],      teacher_step = S2
       ...
-      k = N-1: previous_steps = [S1..S_{N-1}], step_title = title(SN), step_body = body(SN)
+      k = N-1: previous_steps = [S1..S_{N-1}], teacher_step = SN
 
     Args:
         traj: Normalized trajectory dict with "id", "problem", and "steps"
 
     Yields:
-        Dict with keys: traj_id, step_idx, problem, previous_steps, 
-                        step_title, step_body, teacher_step (full step for backward compat)
+        Dict with keys: traj_id, step_idx, problem, previous_steps, teacher_step
     """
     problem = traj["problem"]
     steps = traj["steps"]
@@ -282,19 +209,14 @@ def build_srl_examples(traj: Dict) -> Iterable[Dict]:
 
     for k in range(len(steps)):
         prev_steps = steps[:k]          # teacher steps 0..k-1 (state)
-        teacher_step = steps[k]         # kth step (full step for backward compat)
-        
-        # Split current step into title and body for context injection
-        step_title, step_body = split_step_title_body(teacher_step)
+        teacher_step = steps[k]         # kth step (target action)
 
         yield {
             "traj_id": tid,
             "step_idx": k,
             "problem": problem,
             "previous_steps": prev_steps,
-            "step_title": step_title,       # For context injection
-            "step_body": step_body,         # Target: thinking + action
-            "teacher_step": teacher_step,   # Full step (backward compat)
+            "teacher_step": teacher_step,
         }
 
 
@@ -333,12 +255,12 @@ def save_jsonl(records: List[Dict], path: str) -> None:
 
 # ---------- 5. Main entrypoint ----------
 
-def main():
+if __name__ == "__main__":
     """
     CLI entrypoint: Load dataset, normalize trajectories, build SRL examples, and save.
 
     Usage:
-        srl-build-data
+        python build_srl_data.py
 
     To use a different dataset, modify the arguments to load_teacher_dataset().
     """
@@ -368,8 +290,3 @@ def main():
         print(f"   Average steps per trajectory: {avg_steps:.2f}")
         print(f"   Total trajectories: {len(norm_trajs)}")
         print(f"   Total SRL examples: {len(srl_examples)}")
-
-
-if __name__ == "__main__":
-    main()
-
