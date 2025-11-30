@@ -69,6 +69,40 @@ def _is_step_boundary(line: str) -> bool:
     return False
 
 
+def _is_final_answer(step: str) -> bool:
+    """
+    Detect if a step is just a final answer rather than a reasoning step.
+    
+    Patterns that indicate a final answer:
+    - Just a number (e.g., "167.0", "42", "3.14")
+    - Boxed answers (e.g., "\\boxed{42}", "\\boxed{answer}")
+    - Very short text that's mostly numeric
+    - Common final answer patterns
+    """
+    step = step.strip()
+    
+    # Very short steps are suspicious
+    if len(step) < 10:
+        # Check if it's mostly numeric (like "167.0")
+        # Remove common punctuation and check if rest is numeric
+        cleaned = re.sub(r'[^\d.]', '', step)
+        if len(cleaned) > 0 and len(cleaned) / max(len(step), 1) > 0.7:
+            # More than 70% numeric - likely a final answer
+            return True
+    
+    # Check for boxed answer patterns
+    if re.search(r'\\boxed\{', step) or re.search(r'\\box\{', step):
+        # If the step is mostly just the boxed answer with little reasoning
+        if len(step) < 50:
+            return True
+    
+    # Check if it's just a number with units (e.g., "167.0 m/s")
+    if re.match(r'^[\d.]+(\s*[a-zA-Z/]+)?$', step):
+        return True
+    
+    return False
+
+
 def normalize_trajectory(row: Dict, idx: int) -> Optional[Dict]:
     """
     Convert a raw dataset row into a normalized trajectory dict.
@@ -110,7 +144,14 @@ def normalize_trajectory(row: Dict, idx: int) -> Optional[Dict]:
     # Many datasets store CoT as either:
     #   - a list of step strings (already structured)
     #   - a single long string (needs heuristic splitting)
-    cot = row.get("cot") or row.get("reasoning") or row.get("solution")
+    # For s1K-1.1 dataset, use thinking trajectories (not solution which is just final answer)
+    cot = (
+        row.get("cot") 
+        or row.get("reasoning") 
+        or row.get("deepseek_thinking_trajectory")  # s1K-1.1: DeepSeek r1 reasoning
+        or row.get("gemini_thinking_trajectory")    # s1K-1.1: Gemini reasoning
+        # Note: Do NOT use "solution" - it's just the final answer, not reasoning steps
+    )
 
     steps: List[str] = []
 
@@ -141,8 +182,11 @@ def normalize_trajectory(row: Dict, idx: int) -> Optional[Dict]:
     else:
         return None
 
-    # Filter out very short / junk steps
-    steps = [s for s in steps if len(s) > 3]
+    # Filter out very short / junk steps and final answers
+    steps = [
+        s for s in steps 
+        if len(s) > 3 and not _is_final_answer(s)
+    ]
 
     if not steps:
         return None
@@ -255,12 +299,14 @@ def save_jsonl(records: List[Dict], path: str) -> None:
 
 # ---------- 5. Main entrypoint ----------
 
-if __name__ == "__main__":
+def main():
     """
     CLI entrypoint: Load dataset, normalize trajectories, build SRL examples, and save.
 
     Usage:
-        python build_srl_data.py
+        python -m srl_lib.data.build_srl_data
+        or
+        srl-build-data
 
     To use a different dataset, modify the arguments to load_teacher_dataset().
     """
@@ -290,3 +336,7 @@ if __name__ == "__main__":
         print(f"   Average steps per trajectory: {avg_steps:.2f}")
         print(f"   Total trajectories: {len(norm_trajs)}")
         print(f"   Total SRL examples: {len(srl_examples)}")
+
+
+if __name__ == "__main__":
+    main()
