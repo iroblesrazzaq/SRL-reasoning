@@ -11,6 +11,9 @@ setup(
         "torch",
         "transformers",
         "accelerate",
+        "vllm",
+        "datasets",
+        "pandas",
     ],
     python_requires=">=3.8",
     classifiers=[
