@@ -3,6 +3,151 @@
 from typing import List, Optional
 
 
+# ============================================================================
+# XML-Style Prompt Template (for SFT training and structured generation)
+# ============================================================================
+
+def build_prompt(
+    problem: str,
+    previous_steps: List[str],
+    include_closing_tag: bool = False,
+) -> str:
+    """
+    Build an XML-style prompt for step-wise reasoning (per spec).
+    
+    Creates a structured prompt with:
+    - <problem>: The problem statement
+    - <reasoning_so_far>: Previous reasoning steps (if any)
+    - <instructions>: Instructions for the model
+    - <next_step>: Marker where generation should start
+    
+    This is the spec-compliant prompt format that makes it easy to:
+    - Mask prompt tokens in SFT training (everything before <next_step>)
+    - Extract generated steps (everything after <next_step>)
+    - Set clear stop conditions (stop on </next_step>)
+    
+    Args:
+        problem: The problem statement
+        previous_steps: List of previous reasoning steps (can be empty for first step)
+        include_closing_tag: If True, include </next_step> in the prompt (for training targets)
+        
+    Returns:
+        The formatted prompt string
+        
+    Example:
+        >>> prompt = build_prompt(
+        ...     problem="Solve 2+2",
+        ...     previous_steps=["First, I need to add 2 and 2"]
+        ... )
+        >>> # Returns XML-structured prompt ending with <next_step>
+    """
+    lines = []
+    
+    # Problem section
+    lines.append("<problem>")
+    lines.append(problem.strip())
+    lines.append("</problem>")
+    lines.append("")  # blank line
+    
+    # Reasoning so far section
+    lines.append("<reasoning_so_far>")
+    if previous_steps:
+        for i, step in enumerate(previous_steps):
+            lines.append(f'<step index="{i}">')
+            lines.append(step.strip())
+            lines.append("</step>")
+    else:
+        # Empty reasoning section for first step
+        lines.append("(No previous steps)")
+    lines.append("</reasoning_so_far>")
+    lines.append("")  # blank line
+    
+    # Instructions section
+    lines.append("<instructions>")
+    lines.append(
+        "You are solving the problem step by step.\n"
+        "Only output the next reasoning step.\n"
+        "Do not restate the problem.\n"
+        "Do not output the final answer.\n"
+        "Limit yourself to at most 3-5 sentences."
+    )
+    lines.append("</instructions>")
+    lines.append("")  # blank line
+    
+    # Generation anchor
+    lines.append("<next_step>")
+    if include_closing_tag:
+        lines.append("")  # Will be filled with teacher_step + closing tag
+        lines.append("</next_step>")
+    
+    return "\n".join(lines)
+
+
+def build_prompt_with_target(
+    problem: str,
+    previous_steps: List[str],
+    teacher_step: str,
+) -> str:
+    """
+    Build a complete prompt with the target step (for SFT training).
+    
+    This is the same as build_prompt() but includes the teacher_step and closing tag.
+    Used for creating training examples where the model learns to predict the step.
+    
+    Args:
+        problem: The problem statement
+        previous_steps: List of previous reasoning steps
+        teacher_step: The target step the model should predict
+        
+    Returns:
+        Complete prompt with target step and closing tag
+    """
+    prompt = build_prompt(problem, previous_steps, include_closing_tag=False)
+    return prompt + "\n" + teacher_step.strip() + "\n</next_step>"
+
+
+def extract_next_step_from_output(text: str) -> str:
+    """
+    Extract the generated step from model output.
+    
+    Looks for content after <next_step> tag and before </next_step> or other stop tokens.
+    
+    Args:
+        text: The model's generated text (may include the full prompt + generation)
+        
+    Returns:
+        The extracted step text, or empty string if not found
+    """
+    # Find where generation starts
+    start_tag = "<next_step>"
+    start_idx = text.find(start_tag)
+    
+    if start_idx == -1:
+        return ""
+    
+    # Get everything after <next_step>
+    start_idx += len(start_tag)
+    remaining = text[start_idx:].strip()
+    
+    # Stop at closing tag or other stop tokens
+    stop_tokens = ["</next_step>", "</reasoning_so_far>", "<problem>"]
+    for stop_token in stop_tokens:
+        if stop_token in remaining:
+            remaining = remaining.split(stop_token)[0]
+            break
+    
+    return remaining.strip()
+
+
+# Stop tokens for generation
+STOP_TOKENS = ["</next_step>", "</reasoning_so_far>", "<problem>"]
+
+
+# ============================================================================
+# Legacy Prompt Formats (for backward compatibility)
+# ============================================================================
+
+
 # System prompt for SRL training/inference with think tags
 SRL_SYSTEM_PROMPT = """You are a helpful assistant for solving mathematical problems. A user will provide a math problem, which may include a partial solution. Your task is to continue the solution by providing the very next logical step. You should first draft your thinking process (inner monologue). Then, generate the solution. Your response format must follow the template below: <think> Your thoughts... </think> Provide only the single, next step to continue the solution."""
 
