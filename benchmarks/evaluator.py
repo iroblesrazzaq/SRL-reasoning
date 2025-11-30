@@ -8,22 +8,37 @@ import vllm
 from vllm import SamplingParams
 
 
-# Prompt template for reasoning
-PROMPT_TEMPLATE = """You are a helpful assistant for solving mathematical problems. A user will provide a math problem, which may include a partial solution. Your task is to continue the solution by providing the very next logical step. You should first draft your thinking process (inner monologue). Then, generate the solution. Your response format must follow the template below: <think> Your thoughts... </think> Provide only the single, next step to continue the solution.
+# Prompt template for SRL-trained models (with think tags)
+SRL_PROMPT_TEMPLATE = """You are a helpful assistant for solving mathematical problems. A user will provide a math problem, which may include a partial solution. Your task is to continue the solution by providing the very next logical step. You should first draft your thinking process (inner monologue). Then, generate the solution. Your response format must follow the template below: <think> Your thoughts... </think> Provide only the single, next step to continue the solution.
 
 Question: {problem}
 <think>"""
 
+# Prompt template for base models (no think tags expected)
+BASE_PROMPT_TEMPLATE = """You are a helpful assistant for solving mathematical problems. Solve the problem step by step and provide your final answer in \\boxed{{}}.
 
-def extract_answer(text: str) -> Optional[str]:
+Question: {problem}
+
+Solution:"""
+
+# Backward compatibility alias
+PROMPT_TEMPLATE = SRL_PROMPT_TEMPLATE
+
+
+def extract_answer(text: str, strip_think: bool = True) -> Optional[str]:
     """
     Extract the final answer from model output.
     
-    First looks for \\boxed{...} patterns (handling nested braces).
+    For SRL models, first strips content before </think> to only search
+    in the action portion. This prevents mistaking intermediate numbers
+    in the thought process as the final answer.
+    
+    Then looks for \\boxed{...} patterns (handling nested braces).
     If not found, falls back to extracting the last numerical value.
     
     Args:
         text: The model's generated text.
+        strip_think: If True, only search for answers after </think> tag.
         
     Returns:
         The extracted answer string, or None if no answer found.
@@ -31,14 +46,24 @@ def extract_answer(text: str) -> Optional[str]:
     if not text:
         return None
     
-    # Look for \boxed{...} patterns
-    boxed_answers = _extract_boxed(text)
+    search_text = text
+    
+    # Strip content before </think> to only look at the action portion
+    if strip_think:
+        close_tag = "</think>"
+        close_idx = text.find(close_tag)
+        if close_idx != -1:
+            # Only search in the action portion (after </think>)
+            search_text = text[close_idx + len(close_tag):]
+    
+    # Look for \boxed{...} patterns in the action portion
+    boxed_answers = _extract_boxed(search_text)
     if boxed_answers:
         # Return the last boxed answer (most likely the final answer)
         return boxed_answers[-1]
     
-    # Fallback: find the last numerical value
-    return _extract_last_number(text)
+    # Fallback: find the last numerical value in action portion
+    return _extract_last_number(search_text)
 
 
 def _extract_boxed(text: str) -> List[str]:
@@ -193,21 +218,35 @@ class MathEvaluator:
     Evaluator for math reasoning using vLLM.
     
     Supports greedy decoding and avg@32 (majority voting with 32 samples).
+    Handles both base models and SRL-trained models with appropriate prompts.
     """
     
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, model_type: str = "srl"):
         """
         Initialize the evaluator with a vLLM model.
         
         Args:
             model_path: Path to the model or HuggingFace model ID.
+            model_type: Either "srl" (trained with think tags) or "base" (standard model).
+                       Using the wrong prompt for the model type will lower scores.
         """
+        if model_type not in ("srl", "base"):
+            raise ValueError(f"model_type must be 'srl' or 'base', got '{model_type}'")
+        
         self.model_path = model_path
+        self.model_type = model_type
         self.llm = vllm.LLM(
             model=model_path,
             dtype="bfloat16",
             trust_remote_code=True,
         )
+    
+    def _get_prompt_template(self) -> str:
+        """Get the appropriate prompt template based on model type."""
+        if self.model_type == "base":
+            return BASE_PROMPT_TEMPLATE
+        else:
+            return SRL_PROMPT_TEMPLATE
     
     def evaluate(
         self,
@@ -224,9 +263,10 @@ class MathEvaluator:
         Returns:
             Mean score across all problems (0.0 to 1.0).
         """
-        # Build prompts
+        # Build prompts using appropriate template
+        prompt_template = self._get_prompt_template()
         prompts = [
-            PROMPT_TEMPLATE.format(problem=item['problem'])
+            prompt_template.format(problem=item['problem'])
             for item in data
         ]
         
@@ -247,11 +287,16 @@ class MathEvaluator:
             raise ValueError(f"Unknown mode '{mode}'. Use 'greedy' or 'avg32'.")
         
         # Generate outputs
-        print(f"Generating outputs for {len(prompts)} problems...")
+        print(f"Generating outputs for {len(prompts)} problems (model_type={self.model_type})...")
         start_time = time.time()
         outputs = self.llm.generate(prompts, sampling_params)
         elapsed = time.time() - start_time
         print(f"Generation completed in {elapsed:.2f}s")
+        
+        # Determine whether to strip think tags when extracting answers
+        # For SRL models, we want to only look at the action portion
+        # For base models, search the entire output
+        strip_think = (self.model_type == "srl")
         
         # Score outputs
         scores = []
@@ -261,13 +306,13 @@ class MathEvaluator:
             if mode == 'greedy':
                 # Single output - score is 0 or 1
                 generated_text = output.outputs[0].text
-                pred = extract_answer(generated_text)
+                pred = extract_answer(generated_text, strip_think=strip_think)
                 score = 1.0 if is_correct(pred, truth) else 0.0
             else:
                 # Multiple outputs - calculate pass rate
                 correct_count = 0
                 for sample in output.outputs:
-                    pred = extract_answer(sample.text)
+                    pred = extract_answer(sample.text, strip_think=strip_think)
                     if is_correct(pred, truth):
                         correct_count += 1
                 score = correct_count / len(output.outputs)
