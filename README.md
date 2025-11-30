@@ -8,13 +8,31 @@ A Python implementation of the paper "Supervised Reinforcement Learning: From Ex
 pip install -e .
 ```
 
+Or using `uv` (recommended for faster dependency management):
+
+```bash
+uv sync
+```
+
 ## Dependencies
 
 - torch
 - transformers
 - accelerate
+- datasets (for data processing)
+- tqdm (for progress bars)
+
+## Project Structure
+
+- `srl_lib/` - Core SRL library with reward computation and GRPO utilities
+- `scripts/` - Data processing scripts
+- `benchmarks/` - Benchmark evaluation code
+- `tests/` - Test suite
+- `data/` - Processed data files
 
 ## Usage
+
+### Using the SRL Library
 
 ```python
 from srl_lib import parse_model_output, compute_srl_reward
@@ -30,6 +48,30 @@ reward = compute_srl_reward(model_completion, expert_target)
 mask = dynamic_sampling_filter(rewards_tensor)
 advantages = compute_advantages(rewards_tensor)
 ```
+
+### Data Processing
+
+Process expert trajectories into step-wise SRL training examples:
+
+```bash
+# Using uv
+uv run python scripts/build_srl_data.py
+
+# Or with pip
+python scripts/build_srl_data.py
+```
+
+This script:
+- Loads teacher trajectories from Hugging Face datasets
+- Splits reasoning into discrete steps
+- Creates SRL training examples where each example has:
+  - `traj_id`: ID of the original trajectory
+  - `step_idx`: Zero-based index of the step (0, 1, 2, ...)
+  - `problem`: The problem statement
+  - `previous_steps`: List of previous reasoning steps (state)
+  - `teacher_step`: The target step to predict (action)
+
+Output is saved to `data/srl_steps.jsonl`.
 
 ## Running Tests
 
