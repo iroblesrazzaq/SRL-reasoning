@@ -19,13 +19,15 @@ uv sync
 - torch
 - transformers
 - accelerate
+- vllm
 - datasets (for data processing)
+- pandas
 - tqdm (for progress bars)
 
 ## Project Structure
 
-- `srl_lib/` - Core SRL library with reward computation and GRPO utilities
-- `scripts/` - Data processing scripts
+- `srl_lib/` - Core SRL library with reward computation, GRPO utilities, and data processing
+  - `srl_lib/data/` - Data building utilities for creating SRL training examples
 - `benchmarks/` - Benchmark evaluation code
 - `tests/` - Test suite
 - `data/` - Processed data files
@@ -54,14 +56,29 @@ advantages = compute_advantages(rewards_tensor)
 Process expert trajectories into step-wise SRL training examples:
 
 ```bash
-# Using uv
-uv run python scripts/build_srl_data.py
+# Using the CLI (after pip install -e .)
+srl-build-data
 
-# Or with pip
-python scripts/build_srl_data.py
+# Or using uv
+uv run srl-build-data
+
+# Or run the module directly
+python -m srl_lib.data.builder
 ```
 
-This script:
+You can also use the data building functions programmatically:
+
+```python
+from srl_lib.data import load_teacher_dataset, normalize_dataset, build_srl_dataset, save_jsonl
+
+# Load and process your own dataset
+ds = load_teacher_dataset("your-dataset/name", split="train")
+trajectories = normalize_dataset(ds)
+srl_examples = build_srl_dataset(trajectories)
+save_jsonl(srl_examples, "data/output.jsonl")
+```
+
+The data builder:
 - Loads teacher trajectories from Hugging Face datasets
 - Splits reasoning into discrete steps
 - Creates SRL training examples where each example has:
@@ -78,4 +95,3 @@ Output is saved to `data/srl_steps.jsonl`.
 ```bash
 python -m pytest tests/
 ```
-

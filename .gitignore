@@ -1,53 +1,10 @@
+# Generated exports
+repomix-output.xml
+
 # Python
 __pycache__/
-**/__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+*.pyc
 *.egg-info/
-.installed.cfg
-*.egg
 
-# Virtual environments
-.venv/
-venv/
-ENV/
-env/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Project specific
-data/*.jsonl
-!data/.gitkeep
-
-# UV
-.uv/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Logs
-*.log
-
+# Data (optional - remove if data should be tracked)
+# data/*.jsonl
