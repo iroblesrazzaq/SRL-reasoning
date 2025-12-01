@@ -226,13 +226,19 @@ def main():
     
     # Handle fp16/bf16: only one can be True
     # If fp16 is specified, use it; otherwise default to bf16
+    # Note: FP16 can have issues with gradient clipping, so we disable it
     if args.fp16:
         training_args_dict["fp16"] = True
         training_args_dict["bf16"] = False
+        # Disable gradient clipping for FP16 to avoid "Attempting to unscale FP16 gradients" error
+        training_args_dict["max_grad_norm"] = None
     else:
         # Default to bf16 if neither is explicitly set, or use bf16 if specified
         training_args_dict["fp16"] = False
         training_args_dict["bf16"] = args.bf16 if args.bf16 else True  # Default to True if not specified
+        # bf16 works fine with gradient clipping, so use default (1.0)
+        if "max_grad_norm" not in training_args_dict:
+            training_args_dict["max_grad_norm"] = 1.0
     
     # Add eval-related args if validation dataset exists
     if val_dataset:
