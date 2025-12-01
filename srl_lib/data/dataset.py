@@ -140,15 +140,34 @@ class DataCollator:
         Returns:
             Batched dict with padded input_ids and labels
         """
-        input_ids = [ex["input_ids"] for ex in batch]
-        labels = [ex["labels"] for ex in batch]
+        # Extract input_ids and labels as lists of tensors
+        input_ids_list = [ex["input_ids"] for ex in batch]
+        labels_list = [ex["labels"] for ex in batch]
         
-        # Pad sequences
-        padded = self.tokenizer.pad(
-            {"input_ids": input_ids, "labels": labels},
-            return_tensors="pt",
-            padding=True,
-        )
+        # Find max length in batch
+        max_len = max(ids.shape[0] for ids in input_ids_list)
         
-        return padded
+        # Pad sequences manually
+        pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else self.tokenizer.eos_token_id
+        
+        padded_input_ids = []
+        padded_labels = []
+        
+        for input_ids, labels in zip(input_ids_list, labels_list):
+            # Convert to list if tensor
+            if isinstance(input_ids, torch.Tensor):
+                input_ids = input_ids.tolist()
+            if isinstance(labels, torch.Tensor):
+                labels = labels.tolist()
+            
+            # Pad to max_len
+            pad_len = max_len - len(input_ids)
+            padded_input_ids.append(input_ids + [pad_token_id] * pad_len)
+            padded_labels.append(labels + [-100] * pad_len)  # -100 for padding in labels
+        
+        # Convert to tensors
+        return {
+            "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),
+            "labels": torch.tensor(padded_labels, dtype=torch.long),
+        }
 
