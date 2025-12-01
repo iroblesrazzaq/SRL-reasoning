@@ -112,8 +112,7 @@ def main():
     parser.add_argument(
         "--bf16",
         action="store_true",
-        default=True,
-        help="Use BF16 precision",
+        help="Use BF16 precision (default if neither fp16 nor bf16 specified)",
     )
     
     # Logging/saving
@@ -220,12 +219,20 @@ def main():
         "logging_steps": args.logging_steps,
         "save_steps": args.save_steps,
         "save_total_limit": args.save_total_limit,
-        "fp16": args.fp16,
-        "bf16": args.bf16,
         "seed": args.seed,
         "gradient_checkpointing": args.gradient_checkpointing,
         "report_to": "none",  # Disable wandb/tensorboard by default
     }
+    
+    # Handle fp16/bf16: only one can be True
+    # If fp16 is specified, use it; otherwise default to bf16
+    if args.fp16:
+        training_args_dict["fp16"] = True
+        training_args_dict["bf16"] = False
+    else:
+        # Default to bf16 if neither is explicitly set, or use bf16 if specified
+        training_args_dict["fp16"] = False
+        training_args_dict["bf16"] = args.bf16 if args.bf16 else True  # Default to True if not specified
     
     # Add eval-related args if validation dataset exists
     if val_dataset:
