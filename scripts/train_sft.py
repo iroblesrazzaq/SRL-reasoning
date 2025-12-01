@@ -205,25 +205,42 @@ def main():
     collator = DataCollator(tokenizer)
     
     # Training arguments
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        warmup_ratio=args.warmup_ratio,
-        logging_steps=args.logging_steps,
-        eval_steps=args.eval_steps if val_dataset else None,
-        evaluation_strategy="steps" if val_dataset else "no",
-        save_steps=args.save_steps,
-        save_total_limit=args.save_total_limit,
-        fp16=args.fp16,
-        bf16=args.bf16,
-        seed=args.seed,
-        gradient_checkpointing=args.gradient_checkpointing,
-        report_to="none",  # Disable wandb/tensorboard by default
-    )
+    # Build args dict to support both eval_strategy and evaluation_strategy
+    # (different transformers versions use different parameter names)
+    import inspect
+    
+    training_args_dict = {
+        "output_dir": args.output_dir,
+        "num_train_epochs": args.num_train_epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "warmup_ratio": args.warmup_ratio,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "save_total_limit": args.save_total_limit,
+        "fp16": args.fp16,
+        "bf16": args.bf16,
+        "seed": args.seed,
+        "gradient_checkpointing": args.gradient_checkpointing,
+        "report_to": "none",  # Disable wandb/tensorboard by default
+    }
+    
+    # Add eval-related args if validation dataset exists
+    if val_dataset:
+        training_args_dict["eval_steps"] = args.eval_steps
+        # Check which parameter name is supported by inspecting TrainingArguments signature
+        sig = inspect.signature(TrainingArguments.__init__)
+        if "eval_strategy" in sig.parameters:
+            training_args_dict["eval_strategy"] = "steps"
+        elif "evaluation_strategy" in sig.parameters:
+            training_args_dict["evaluation_strategy"] = "steps"
+        else:
+            # Fallback: try eval_strategy first (more common in recent versions)
+            training_args_dict["eval_strategy"] = "steps"
+    
+    training_args = TrainingArguments(**training_args_dict)
     
     # Initialize trainer
     trainer = Trainer(
