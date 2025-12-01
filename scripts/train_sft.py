@@ -16,6 +16,7 @@ from transformers import (
     AutoTokenizer,
     TrainingArguments,
     Trainer,
+    BitsAndBytesConfig,
 )
 
 # Add parent directory to path for imports
@@ -79,6 +80,13 @@ def main():
         type=int,
         default=4,
         help="Gradient accumulation steps",
+    )
+    parser.add_argument(
+        "--optim",
+        type=str,
+        default="adamw_torch",
+        choices=["adamw_torch", "adamw_8bit", "adamw_bnb_8bit"],
+        help="Optimizer to use. Use adamw_8bit or adamw_bnb_8bit for 8-bit optimizer (requires bitsandbytes)",
     )
     parser.add_argument(
         "--learning_rate",
@@ -221,6 +229,7 @@ def main():
         "save_total_limit": args.save_total_limit,
         "seed": args.seed,
         "gradient_checkpointing": args.gradient_checkpointing,
+        "optim": args.optim,  # Support 8-bit optimizer
         "report_to": "none",  # Disable wandb/tensorboard by default
     }
     
