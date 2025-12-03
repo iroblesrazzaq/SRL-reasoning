@@ -183,13 +183,18 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     
     # Load model
+    # Don't use device_map="auto" with Trainer - let Trainer handle device placement
+    # This ensures proper GPU usage during training
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         torch_dtype=torch.bfloat16 if args.bf16 else (torch.float16 if args.fp16 else torch.float32),
         trust_remote_code=True,
-        device_map="auto",
         attn_implementation=args.attn_implementation,
     )
+    
+    # Move model to GPU if available (Trainer will handle this, but doing it explicitly ensures it's on GPU)
+    if torch.cuda.is_available():
+        model = model.to("cuda")
     # Apply LoRA
     lora_config = LoraConfig(
         r=16,
@@ -262,6 +267,9 @@ def main():
         "gradient_checkpointing": args.gradient_checkpointing,
         "optim": args.optim,  # Support 8-bit optimizer
         "report_to": "none",  # Disable wandb/tensorboard by default
+        # Ensure GPU is used
+        "fp16": args.fp16,
+        "bf16": args.bf16 if args.bf16 else (not args.fp16),  # Default to bf16 if neither specified
     }
     
     # Handle fp16/bf16: only one can be True
