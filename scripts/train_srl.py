@@ -320,27 +320,33 @@ def main():
         trust_remote_code=True,
         device_map="auto",
     )
+    # Apply LoRA
     lora_config = LoraConfig(
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
         target_modules="all-linear",
         task_type=TaskType.CAUSAL_LM,
+        bias="none",
     )
     model = get_peft_model(model, lora_config)
     
-    # Ensure model is in training mode and LoRA adapters are trainable
-    model.train()
-    for name, param in model.named_parameters():
-        if 'lora' in name.lower():
-            param.requires_grad = True
+    # Enable input gradients (required for training)
+    model.enable_input_require_grads()
     
-    # Verify GPU usage
+    # Set to training mode
+    model.train()
+    
+    # Verify setup
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n✓ Model setup:")
+    print(f"  Trainable params: {trainable_params / 1e6:.2f}M ({100 * trainable_params / total_params:.2f}%)")
+    print(f"  Total params: {total_params / 1e6:.2f}M")
+    
     if torch.cuda.is_available():
-        print(f"Model device: {next(model.parameters()).device}")
-        print(f"GPU Memory after loading: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Trainable parameters: {trainable_params / 1e6:.2f}M")
+        print(f"  Model device: {next(model.parameters()).device}")
+        print(f"  GPU Memory: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
     
     print(f"Loading dataset from: {args.data_path}")
     dataset = load_srl_dataset(args.data_path)
