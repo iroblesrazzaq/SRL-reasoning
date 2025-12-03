@@ -7,7 +7,7 @@ dependencies = [
     "torch",
     "transformers",
     "accelerate",
-    "vllm",
+    "vllm==0.10.2",  # Pin to version compatible with TRL
     "peft",
     "bitsandbytes",
     "trl>=0.9.0",
