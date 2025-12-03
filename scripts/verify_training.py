@@ -91,8 +91,40 @@ def main():
     print("TRAINING VERIFICATION")
     print("=" * 80)
     
+    # Check if path exists
+    print(f"\nChecking model path: {model_path}")
+    print(f"Absolute path: {model_path.resolve()}")
+    print(f"Path exists: {model_path.exists()}")
+    
+    if not model_path.exists():
+        print(f"\n❌ ERROR: Model path does not exist: {model_path}")
+        print("\nTroubleshooting:")
+        print("1. Make sure Google Drive is mounted:")
+        print("   from google.colab import drive")
+        print("   drive.mount('/content/drive')")
+        print("\n2. Check the correct path in Google Drive")
+        print("3. Use absolute path: /content/drive/MyDrive/srl_outputs/sft_0.5b_test")
+        return
+    
+    # List all files in directory
+    print(f"\nFiles in directory:")
+    try:
+        all_files = list(model_path.iterdir())
+        if all_files:
+            for f in sorted(all_files):
+                if f.is_file():
+                    size = f.stat().st_size / (1024 * 1024)  # MB
+                    print(f"   - {f.name} ({size:.2f} MB)")
+                else:
+                    print(f"   - {f.name}/ (directory)")
+        else:
+            print("   (directory is empty)")
+    except Exception as e:
+        print(f"   ERROR listing files: {e}")
+        return
+    
     # 1. Check files exist
-    print("\n1. Checking model files...")
+    print("\n1. Checking required model files...")
     required_files = [
         "adapter_config.json",
         "adapter_model.safetensors",
