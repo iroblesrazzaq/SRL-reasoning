@@ -239,15 +239,20 @@ def main():
         use_xml_prompts=args.use_xml_prompts,
     )
     
+    # Disable validation dataset to avoid OOM during evaluation
+    # Evaluation causes OOM due to logit accumulation even with prediction_loss_only=True
     val_dataset = None
     if args.val_data and Path(args.val_data).exists():
-        print(f"Loading validation dataset from: {args.val_data}")
-        val_dataset = StepDataset(
-            args.val_data,
-            tokenizer,
-            max_length=args.max_length,
-            use_xml_prompts=args.use_xml_prompts,
-        )
+        print(f"⚠️  Validation dataset found but evaluation is disabled to prevent OOM.")
+        print(f"   You can evaluate manually after training using scripts/verify_training.py")
+        # Uncomment below if you want to enable evaluation (may cause OOM):
+        # print(f"Loading validation dataset from: {args.val_data}")
+        # val_dataset = StepDataset(
+        #     args.val_data,
+        #     tokenizer,
+        #     max_length=args.max_length,
+        #     use_xml_prompts=args.use_xml_prompts,
+        # )
     
     # Data collator
     collator = DataCollator(tokenizer)
