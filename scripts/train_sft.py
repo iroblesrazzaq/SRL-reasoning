@@ -7,9 +7,14 @@ a problem and previous steps, using teacher forcing.
 """
 
 import argparse
+import os
 from pathlib import Path
 
 import torch
+
+# Enable expandable segments to reduce CUDA memory fragmentation
+# This helps when you have enough total memory but allocation fails due to fragmentation
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -297,25 +302,28 @@ def main():
         else:
             # Fallback: try eval_strategy first (more common in recent versions)
             training_args_dict["eval_strategy"] = "steps"
+        
+        # Disable prediction gathering during evaluation to save memory
+        # We only need loss, not full predictions
+        # Note: This should prevent gathering logits, but if it doesn't work,
+        # we can reduce eval batch size or skip evaluation during training
+        training_args_dict["prediction_loss_only"] = True
+        # Also reduce eval batch size to minimize memory usage
+        training_args_dict["per_device_eval_batch_size"] = 1
     
     training_args = TrainingArguments(**training_args_dict)
     
-    # Custom compute_metrics to handle NaN gracefully
-    def compute_metrics(eval_pred):
-        """Compute metrics for evaluation, handling NaN cases."""
-        predictions, labels = eval_pred
-        # If loss is NaN, return a default value
-        # The actual loss is computed by the Trainer internally
-        return {}
-    
     # Initialize trainer
+    # Note: We use prediction_loss_only=True in training_args to avoid OOM during eval
+    # This means we only compute loss, not full predictions/logits
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=collator,
-        compute_metrics=compute_metrics if val_dataset else None,
+        # Don't use compute_metrics - it requires gathering predictions which causes OOM
+        # We only need eval_loss, which is computed automatically
     )
     
     print("Starting SFT training...")
