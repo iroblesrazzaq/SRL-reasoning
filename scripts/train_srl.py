@@ -356,6 +356,9 @@ def main():
     reward_fn = create_reward_function(tokenizer)
     
     # Configure GRPO training
+    # Note: max_new_tokens is not a parameter of GRPOConfig
+    # Generation length is controlled by max_length in the config
+    # The actual generation uses vLLM which respects max_length
     grpo_config = GRPOConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.num_train_epochs,
@@ -370,14 +373,16 @@ def main():
         bf16=args.bf16,
         seed=args.seed,
         # GRPO-specific settings
-        num_generations=args.num_generations,  # k=8 rollouts per prompt
-        max_new_tokens=args.max_new_tokens,
-        temperature=1.0,  # For diverse rollouts
-        # Generation settings
-        max_length=args.max_length,
+        num_generations=args.num_generations,  # k rollouts per prompt
+        max_length=args.max_length,  # Controls generation length
+        # Note: max_new_tokens is handled internally by vLLM/TRL
+        # The generation will respect max_length - prompt_length
     )
     
     print("Initializing GRPO Trainer...")
+    print(f"  num_generations: {args.num_generations}")
+    print(f"  max_length: {args.max_length}")
+    print(f"  (max_new_tokens={args.max_new_tokens} will be approximated by max_length)")
     
     # Initialize trainer with dynamic sampling
     trainer = SRLGRPOTrainer(
