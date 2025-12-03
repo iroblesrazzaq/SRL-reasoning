@@ -39,84 +39,92 @@ def load_teacher_dataset(
 
 # ---------- 2. Normalize each row into {id, problem, steps[]} ----------
 
-def _is_step_boundary(line: str) -> bool:
-    """
-    Detect if a line looks like the start of a new reasoning step.
-    
-    Patterns detected:
-    - "Step 1:", "Step 2:", etc.
-    - "1.", "2.", "3.", etc. (any number followed by period)
-    - "First,", "Second,", "Third,", etc.
-    - Lines starting with common step indicators
-    """
-    line_lower = line.lower().strip()
-    
-    # Pattern: "Step N:" or "Step N."
-    if re.match(r'^step\s+\d+[.:]', line_lower):
-        return True
-    
-    # Pattern: "N." where N is a number (e.g., "1.", "2.", "10.")
-    if re.match(r'^\d+\.\s', line):
-        return True
-    
-    # Pattern: "First,", "Second,", "Third,", etc.
-    ordinal_patterns = ['first', 'second', 'third', 'fourth', 'fifth', 
-                       'sixth', 'seventh', 'eighth', 'ninth', 'tenth']
-    if any(line_lower.startswith(ord + ',') or line_lower.startswith(ord + '.') 
-           for ord in ordinal_patterns):
-        return True
-    
-    return False
+# Regex pattern to match structured steps in deepseek_attempt field
+# Format: "N. **Step Name**:" where N is a number
+STEP_HEADER_PATTERN = re.compile(r'(\d+)\.\s*\*\*([^*]+)\*\*:?\s*', re.MULTILINE)
+
+# Validation pattern to check if text has the expected step format
+# Requires at least 2 numbered steps with **bold titles**
+VALID_FORMAT_PATTERN = re.compile(r'^\d+\.\s*\*\*[^*]+\*\*', re.MULTILINE)
 
 
-def _is_final_answer(step: str) -> bool:
+def _has_valid_step_format(text: str) -> bool:
     """
-    Detect if a step is just a final answer rather than a reasoning step.
+    Check if text follows the expected structured step format.
     
-    Patterns that indicate a final answer:
-    - Just a number (e.g., "167.0", "42", "3.14")
-    - Boxed answers (e.g., "\\boxed{42}", "\\boxed{answer}")
-    - Very short text that's mostly numeric
-    - Common final answer patterns
+    Valid format has numbered steps with bold titles like:
+        1. **Step Name**:
+           - Content here
+        
+        2. **Another Step**:
+           - More content
+    
+    Args:
+        text: The deepseek_attempt text to validate
+        
+    Returns:
+        True if text has at least 2 properly formatted steps
     """
-    step = step.strip()
+    if not text:
+        return False
+    matches = VALID_FORMAT_PATTERN.findall(text)
+    return len(matches) >= 2
+
+
+def _parse_structured_steps(text: str) -> List[Dict[str, str]]:
+    """
+    Parse structured steps from deepseek_attempt text.
     
-    # Very short steps are suspicious
-    if len(step) < 10:
-        # Check if it's mostly numeric (like "167.0")
-        # Remove common punctuation and check if rest is numeric
-        cleaned = re.sub(r'[^\d.]', '', step)
-        if len(cleaned) > 0 and len(cleaned) / max(len(step), 1) > 0.7:
-            # More than 70% numeric - likely a final answer
-            return True
+    Extracts step number, title, and body from formatted text like:
+        1. **Prime Factorization**:
+           - The prime factors are...
+        
+        2. **Coprime Pairs**:
+           - For a x b = 20!...
     
-    # Check for boxed answer patterns
-    if re.search(r'\\boxed\{', step) or re.search(r'\\box\{', step):
-        # If the step is mostly just the boxed answer with little reasoning
-        if len(step) < 50:
-            return True
+    Args:
+        text: The deepseek_attempt text to parse
+        
+    Returns:
+        List of dicts with keys: step_num, step_title, step_body
+    """
+    matches = list(STEP_HEADER_PATTERN.finditer(text))
+    if not matches:
+        return []
     
-    # Check if it's just a number with units (e.g., "167.0 m/s")
-    if re.match(r'^[\d.]+(\s*[a-zA-Z/]+)?$', step):
-        return True
+    steps = []
+    for i, match in enumerate(matches):
+        step_num = match.group(1)
+        step_title = match.group(2).strip()
+        
+        # Extract body: from end of this header to start of next header (or end of text)
+        body_start = match.end()
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        step_body = text[body_start:body_end].strip()
+        
+        steps.append({
+            "step_num": step_num,
+            "step_title": step_title,
+            "step_body": step_body,
+        })
     
-    return False
+    return steps
 
 
 def normalize_trajectory(row: Dict, idx: int) -> Optional[Dict]:
     """
     Convert a raw dataset row into a normalized trajectory dict.
 
-    This function extracts the problem statement and splits the chain-of-thought
-    reasoning into discrete steps. The output format is:
+    This function extracts the problem statement and parses the structured
+    reasoning steps from the deepseek_attempt field. The output format is:
         {
           "id": str,
           "problem": str,
-          "steps": [str, str, ...]
+          "steps": [{"step_num": str, "step_title": str, "step_body": str}, ...]
         }
 
-    The steps will later be used to create SRL training examples where each step
-    becomes a target action given the previous steps as state.
+    Only examples with properly formatted steps (N. **Step Name**:) are kept.
+    Examples without this format are discarded.
 
     Args:
         row: Raw dataset row (dict)
@@ -124,71 +132,34 @@ def normalize_trajectory(row: Dict, idx: int) -> Optional[Dict]:
 
     Returns:
         Normalized trajectory dict, or None if the row is invalid/missing required fields
-
-    Note:
-        You can customize field names (e.g., "question" -> "prompt") depending on
-        your dataset schema.
     """
     # ---- ID ----
     ex_id = str(row.get("id", idx))
 
     # ---- Problem text ----
-    # s1K-style datasets usually use "question" or "prompt"
-    # Adjust these field names based on your dataset
     problem = row.get("question") or row.get("prompt")
     if problem is None:
-        # Skip rows without a problem statement
         return None
 
-    # ---- Reasoning steps ----
-    # Many datasets store CoT as either:
-    #   - a list of step strings (already structured)
-    #   - a single long string (needs heuristic splitting)
-    # For s1K-1.1 dataset, use thinking trajectories (not solution which is just final answer)
-    cot = (
-        row.get("cot") 
-        or row.get("reasoning") 
-        or row.get("deepseek_thinking_trajectory")  # s1K-1.1: DeepSeek r1 reasoning
-        or row.get("gemini_thinking_trajectory")    # s1K-1.1: Gemini reasoning
-        # Note: Do NOT use "solution" - it's just the final answer, not reasoning steps
-    )
-
-    steps: List[str] = []
-
-    if isinstance(cot, list):
-        # Already step-wise: just clean and filter
-        steps = [s.strip() for s in cot if s and s.strip()]
-    elif isinstance(cot, str):
-        text = cot.strip()
-        if not text:
-            return None
-
-        # Heuristic splitter: break on step boundaries
-        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-
-        current = []
-        for ln in lines:
-            # If this line looks like a step boundary and we have accumulated content,
-            # save the previous step and start a new one
-            if _is_step_boundary(ln) and current:
-                steps.append(" ".join(current).strip())
-                current = [ln]
-            else:
-                current.append(ln)
-        
-        # Don't forget the last step
-        if current:
-            steps.append(" ".join(current).strip())
-    else:
+    # ---- Reasoning steps from deepseek_attempt ----
+    # Use deepseek_attempt which has structured steps with numbered **bold titles**
+    # This field contains cleaner, more structured reasoning than deepseek_thinking_trajectory
+    attempt = row.get("deepseek_attempt")
+    
+    if not attempt or not isinstance(attempt, str):
         return None
-
-    # Filter out very short / junk steps and final answers
-    steps = [
-        s for s in steps 
-        if len(s) > 3 and not _is_final_answer(s)
-    ]
-
-    if not steps:
+    
+    # Validate that the attempt follows the expected format
+    if not _has_valid_step_format(attempt):
+        return None
+    
+    # Parse the structured steps
+    steps = _parse_structured_steps(attempt)
+    
+    # Filter out empty steps
+    steps = [s for s in steps if s["step_body"].strip()]
+    
+    if len(steps) < 2:
         return None
 
     return {
@@ -232,7 +203,7 @@ def build_srl_examples(traj: Dict) -> Iterable[Dict]:
     teacher's step serves as the target label for supervised learning.
 
     Given one normalized trajectory:
-        { "id": ..., "problem": ..., "steps": [S1, S2, ..., SN] }
+        { "id": ..., "problem": ..., "steps": [{step_num, step_title, step_body}, ...] }
 
     This produces N examples (one for each step):
 
@@ -245,21 +216,31 @@ def build_srl_examples(traj: Dict) -> Iterable[Dict]:
         traj: Normalized trajectory dict with "id", "problem", and "steps"
 
     Yields:
-        Dict with keys: traj_id, step_idx, problem, previous_steps, teacher_step
+        Dict with keys: traj_id, step_idx, problem, previous_steps, step_title, step_body, teacher_step
     """
     problem = traj["problem"]
     steps = traj["steps"]
     tid = traj["id"]
 
     for k in range(len(steps)):
-        prev_steps = steps[:k]          # teacher steps 0..k-1 (state)
-        teacher_step = steps[k]         # kth step (target action)
+        # Previous steps as formatted strings for context
+        prev_steps_formatted = []
+        for ps in steps[:k]:
+            formatted = f"{ps['step_num']}. **{ps['step_title']}**: {ps['step_body']}"
+            prev_steps_formatted.append(formatted)
+        
+        current_step = steps[k]
+        
+        # teacher_step is the full formatted step for backward compatibility
+        teacher_step = f"{current_step['step_num']}. **{current_step['step_title']}**: {current_step['step_body']}"
 
         yield {
             "traj_id": tid,
             "step_idx": k,
             "problem": problem,
-            "previous_steps": prev_steps,
+            "previous_steps": prev_steps_formatted,
+            "step_title": current_step["step_title"],
+            "step_body": current_step["step_body"],
             "teacher_step": teacher_step,
         }
 

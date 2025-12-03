@@ -55,8 +55,8 @@ def load_srl_dataset(data_path: str) -> Dataset:
             step_title=ex.get("step_title"),
         )
         
-        # The expert target is the step body (or full teacher step for backward compat)
-        expert_target = ex.get("step_body") or ex.get("teacher_step", "")
+        # The expert target is the step body
+        expert_target = ex["step_body"]
         
         processed.append({
             "prompt": prompt,
@@ -77,22 +77,30 @@ def create_reward_function(tokenizer):
         tokenizer: The tokenizer (used for decoding if needed).
         
     Returns:
-        A callable that takes completions and returns rewards.
+        A callable compatible with TRL v0.25.1's reward function API.
     """
-    def reward_fn(completions: List[str], prompts: List[str], expert_targets: List[str]) -> List[float]:
+    def reward_fn(completions: List[str], expert_target: List[str], **kwargs) -> List[float]:
         """
         Compute rewards for a batch of completions.
         
+        TRL v0.25.1 calls reward functions with keyword arguments:
+        - prompts: List of input prompts
+        - completions: List of model-generated completions
+        - completions_ids: Tokenized completion IDs
+        - expert_target: List of expert targets (from dataset column)
+        - trainer_state: Current trainer state
+        
         Args:
             completions: List of model-generated completions.
-            prompts: List of input prompts (not used, but required by TRL).
-            expert_targets: List of expert target strings.
+            expert_target: List of expert target strings (from dataset).
+            **kwargs: Additional TRL-provided args (prompts, completions_ids, 
+                      trainer_state, etc.) - ignored but required for compatibility.
             
         Returns:
             List of reward values.
         """
         rewards = []
-        for completion, target in zip(completions, expert_targets):
+        for completion, target in zip(completions, expert_target):
             reward = compute_srl_reward(completion, target)
             rewards.append(reward)
         return rewards
@@ -107,44 +115,68 @@ class SRLGRPOTrainer(GRPOTrainer):
     This extends TRL's GRPOTrainer to filter out samples
     where reward variance is near zero (too hard or too easy),
     as they provide weak learning signals.
+    
+    The filtering is applied at the advantage computation stage,
+    where we have access to per-prompt reward distributions.
     """
     
     def __init__(self, *args, filter_epsilon: float = 1e-4, **kwargs):
         super().__init__(*args, **kwargs)
         self.filter_epsilon = filter_epsilon
+        self._last_filter_stats = {"kept": 0, "total": 0}
     
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    def _compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         """
-        Override to apply dynamic sampling filter before computing loss.
+        Override advantage computation to apply dynamic sampling filter.
         
-        This filters out prompts where the model is consistently failing
-        or succeeding across all rollouts (zero gradient signal).
-        """
-        # Get the rewards tensor from inputs if available
-        if "rewards" in inputs and inputs["rewards"] is not None:
-            rewards = inputs["rewards"]
+        This zeros out advantages for prompts where rewards have zero variance
+        (model is consistently succeeding or failing), effectively removing
+        their contribution to the gradient.
+        
+        Args:
+            rewards: Tensor of shape (batch_size, num_generations) containing rewards.
             
-            # Apply dynamic sampling filter
-            if rewards.dim() == 2 and rewards.size(1) > 1:
-                mask = dynamic_sampling_filter(rewards, epsilon=self.filter_epsilon)
-                
-                # Only proceed if we have samples to keep
-                if mask.any():
-                    # Filter inputs based on mask
-                    for key in inputs:
-                        if torch.is_tensor(inputs[key]) and inputs[key].size(0) == mask.size(0):
-                            inputs[key] = inputs[key][mask]
-                    
-                    # Log filtering statistics
-                    kept = mask.sum().item()
-                    total = mask.size(0)
-                    if hasattr(self, "accelerator"):
-                        self.accelerator.log({
-                            "dynamic_sampling/kept_ratio": kept / total,
-                            "dynamic_sampling/filtered_out": total - kept,
-                        })
+        Returns:
+            Tensor of advantages with same shape.
+        """
+        # Get the mask for samples with meaningful variance
+        mask = dynamic_sampling_filter(rewards, epsilon=self.filter_epsilon)
         
-        return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
+        # Track statistics for logging
+        kept = mask.sum().item()
+        total = mask.size(0)
+        self._last_filter_stats = {"kept": kept, "total": total}
+        
+        # Compute base advantages using parent method
+        # GRPO normalizes rewards per-group: A_i = (r_i - mean(r)) / std(r)
+        advantages = super()._compute_advantages(rewards)
+        
+        # Zero out advantages for filtered samples (no gradient contribution)
+        # This is numerically stable and doesn't change batch sizes
+        if mask.dim() == 1 and advantages.dim() == 2:
+            # Expand mask to match advantages shape (batch, num_generations)
+            mask_expanded = mask.unsqueeze(1).expand_as(advantages)
+            advantages = advantages * mask_expanded.float()
+        
+        return advantages
+    
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        """
+        Override training step to log dynamic sampling statistics.
+        """
+        loss = super().training_step(model, inputs, num_items_in_batch)
+        
+        # Log filtering statistics after each step
+        if self._last_filter_stats["total"] > 0:
+            kept_ratio = self._last_filter_stats["kept"] / self._last_filter_stats["total"]
+            filtered_out = self._last_filter_stats["total"] - self._last_filter_stats["kept"]
+            
+            self.log({
+                "dynamic_sampling/kept_ratio": kept_ratio,
+                "dynamic_sampling/filtered_out": filtered_out,
+            })
+        
+        return loss
 
 
 def main():
@@ -233,9 +265,9 @@ def main():
     )
     parser.add_argument(
         "--bf16",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use bfloat16 precision",
+        help="Use bfloat16 precision (default: True, use --no-bf16 to disable)",
     )
     parser.add_argument(
         "--logging_steps",
@@ -248,6 +280,25 @@ def main():
         type=int,
         default=500,
         help="Save checkpoint every N steps",
+    )
+    parser.add_argument(
+        "--save_strategy",
+        type=str,
+        default="steps",
+        choices=["steps", "epoch", "no"],
+        help="Checkpoint save strategy",
+    )
+    parser.add_argument(
+        "--save_total_limit",
+        type=int,
+        default=3,  # Safe default: only keep last 3 checkpoints
+        help="Maximum number of checkpoints to keep (older ones deleted)",
+    )
+    parser.add_argument(
+        "--optim",
+        type=str,
+        default="adamw_torch",
+        help="Optimizer to use (e.g., adamw_torch, adamw_8bit)",
     )
     
     args = parser.parse_args()
@@ -290,6 +341,9 @@ def main():
         learning_rate=args.learning_rate,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
+        save_strategy=args.save_strategy,
+        save_total_limit=args.save_total_limit,
+        optim=args.optim,
         bf16=args.bf16,
         seed=args.seed,
         # GRPO-specific settings
