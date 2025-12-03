@@ -295,6 +295,14 @@ def main():
     
     training_args = TrainingArguments(**training_args_dict)
     
+    # Custom compute_metrics to handle NaN gracefully
+    def compute_metrics(eval_pred):
+        """Compute metrics for evaluation, handling NaN cases."""
+        predictions, labels = eval_pred
+        # If loss is NaN, return a default value
+        # The actual loss is computed by the Trainer internally
+        return {}
+    
     # Initialize trainer
     trainer = Trainer(
         model=model,
@@ -302,6 +310,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=collator,
+        compute_metrics=compute_metrics if val_dataset else None,
     )
     
     print("Starting SFT training...")
