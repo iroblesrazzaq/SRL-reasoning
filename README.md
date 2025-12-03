@@ -26,19 +26,22 @@ uv sync
 
 ## Project Structure
 
-- `srl_lib/` - Core SRL library with reward computation, GRPO utilities, and data processing
-  - `srl_lib/data/` - Data building utilities for creating SRL training examples
+- `src/shared/` - Common prompts, formatting, generation, data building, and split helpers
+- `src/srl/` - SRL-specific pieces (rewards, GRPO utilities)
+- `src/sft/` - SFT-specific dataset + collator
+- `scripts/` - CLI entrypoints (train SRL/SFT, build data, create splits)
 - `benchmarks/` - Benchmark evaluation code
-- `tests/` - Test suite
-- `data/` - Processed data files
+- `data/` - Processed data artifacts (JSONL, etc.)
+
+Tip for notebooks/Colab: run `pip install -e .` first so `import src...` works without manual `sys.path` tweaks.
 
 ## Usage
 
 ### Using the SRL Library
 
 ```python
-from srl_lib import parse_model_output, compute_srl_reward
-from srl_lib import dynamic_sampling_filter, compute_advantages
+from src.shared import parse_model_output
+from src.srl import compute_srl_reward, dynamic_sampling_filter, compute_advantages
 
 # Parse model output with <think> tags
 thought, action = parse_model_output("<think>reasoning here</think>final answer")
@@ -63,13 +66,13 @@ srl-build-data
 uv run srl-build-data
 
 # Or run the module directly
-python -m srl_lib.data.builder
+python -m src.shared.build_srl_data
 ```
 
 You can also use the data building functions programmatically:
 
 ```python
-from srl_lib.data import load_teacher_dataset, normalize_dataset, build_srl_dataset, save_jsonl
+from src.shared import load_teacher_dataset, normalize_dataset, build_srl_dataset, save_jsonl
 
 # Load and process your own dataset
 ds = load_teacher_dataset("your-dataset/name", split="train")
@@ -86,12 +89,7 @@ The data builder:
   - `step_idx`: Zero-based index of the step (0, 1, 2, ...)
   - `problem`: The problem statement
   - `previous_steps`: List of previous reasoning steps (state)
-  - `teacher_step`: The target step to predict (action)
+  - `step_title`: Title/header of the step (used for context injection)
+  - `step_body`: The target step content to predict (action)
 
 Output is saved to `data/srl_steps.jsonl`.
-
-## Running Tests
-
-```bash
-python -m pytest tests/
-```

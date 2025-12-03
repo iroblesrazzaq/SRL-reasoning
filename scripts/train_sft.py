@@ -7,7 +7,6 @@ a problem and previous steps, using teacher forcing.
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 import torch
@@ -18,11 +17,9 @@ from transformers import (
     Trainer,
     BitsAndBytesConfig,
 )
+from peft import LoraConfig, TaskType, get_peft_model
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from srl_lib.data.dataset import StepDataset, DataCollator
+from src.sft.dataset import StepDataset, DataCollator
 
 
 def main():
@@ -48,6 +45,12 @@ def main():
         type=str,
         default="Qwen/Qwen2.5-7B-Instruct",
         help="Base model to fine-tune",
+    )
+    parser.add_argument(
+        "--attn_implementation",
+        type=str,
+        default="flash_attention_2",
+        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to flash_attention_2 for speed on supported GPUs.",
     )
     parser.add_argument(
         "--output_dir",
@@ -84,7 +87,7 @@ def main():
     parser.add_argument(
         "--optim",
         type=str,
-        default="adamw_torch",
+        default="adamw_8bit",
         choices=["adamw_torch", "adamw_8bit", "adamw_bnb_8bit"],
         help="Optimizer to use. Use adamw_8bit or adamw_bnb_8bit for 8-bit optimizer (requires bitsandbytes)",
     )
@@ -174,7 +177,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name,
         trust_remote_code=True,
-        padding_side="left",
+        padding_side="right",
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -185,7 +188,16 @@ def main():
         torch_dtype=torch.bfloat16 if args.bf16 else (torch.float16 if args.fp16 else torch.float32),
         trust_remote_code=True,
         device_map="auto",
+        attn_implementation=args.attn_implementation,
     )
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules="all-linear",
+        task_type=TaskType.CAUSAL_LM,
+    )
+    model = get_peft_model(model, lora_config)
     
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -286,4 +298,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
