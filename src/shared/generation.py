@@ -59,7 +59,7 @@ def generate_student_step(
     if stop_tokens is None:
         stop_tokens = STOP_TOKENS
     
-    # Build the prompt (XML-style)
+    # Build the prompt matching the paper wording
     prompt = build_srl_prompt(problem, previous_steps, include_closing_tag=False)
     
     # Tokenize the prompt
@@ -80,7 +80,7 @@ def generate_student_step(
     # Decode the full output (prompt + generation)
     full_output = tokenizer.decode(output_ids, skip_special_tokens=False)
     
-    # Extract just the generated step (after <next_step>)
+    # Extract just the generated step (after </think>)
     generated_step = extract_next_step_from_output(full_output)
     
     # Also apply manual stop token filtering as backup
