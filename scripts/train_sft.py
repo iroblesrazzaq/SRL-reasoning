@@ -267,9 +267,6 @@ def main():
         "gradient_checkpointing": args.gradient_checkpointing,
         "optim": args.optim,  # Support 8-bit optimizer
         "report_to": "none",  # Disable wandb/tensorboard by default
-        # Ensure GPU is used
-        "fp16": args.fp16,
-        "bf16": args.bf16 if args.bf16 else (not args.fp16),  # Default to bf16 if neither specified
     }
     
     # Handle fp16/bf16: only one can be True
