@@ -49,8 +49,8 @@ def main():
     parser.add_argument(
         "--attn_implementation",
         type=str,
-        default="flash_attention_2",
-        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to flash_attention_2 for speed on supported GPUs.",
+        default="sdpa",
+        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'sdpa' (PyTorch built-in) to avoid flash-attn dependency.",
     )
     parser.add_argument(
         "--output_dir",
