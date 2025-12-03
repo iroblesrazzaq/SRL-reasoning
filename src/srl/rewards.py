@@ -1,7 +1,7 @@
 """Reward computation for SRL training."""
 
 import difflib
-from .formatting import parse_model_output
+from ..shared.formatting import parse_model_output
 
 
 def compute_srl_reward(model_completion: str, expert_target: str) -> float:
