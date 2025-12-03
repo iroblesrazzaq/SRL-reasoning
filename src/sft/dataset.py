@@ -6,7 +6,7 @@ from typing import List, Dict, Optional
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
 
-from ..prompts import build_prompt, build_prompt_with_target
+from ..shared.prompts import build_srl_prompt, build_srl_prompt_with_target
 
 
 class StepDataset(Dataset):
@@ -16,10 +16,10 @@ class StepDataset(Dataset):
     Each example contains:
     - problem: The problem statement
     - previous_steps: List of previous reasoning steps
-    - teacher_step: The target step to predict
+    - step_body: The target step to predict
     
     The dataset builds prompts using XML-style format and creates
-    labels that mask the prompt tokens (only compute loss on teacher_step).
+    labels that mask the prompt tokens (only compute loss on step_body).
     """
     
     def __init__(
@@ -61,30 +61,30 @@ class StepDataset(Dataset):
         
         Returns:
             Dict with keys:
-            - input_ids: Tokenized full sequence (prompt + teacher_step)
+            - input_ids: Tokenized full sequence (prompt + step_body)
             - labels: Same as input_ids, but with -100 for prompt tokens
         """
         ex = self.data[idx]
         problem = ex["problem"]
         previous_steps = ex.get("previous_steps", [])
         
-        # Get teacher step (prefer step_body if available, fallback to teacher_step)
-        teacher_step = ex.get("step_body") or ex.get("teacher_step", "")
+        # Get the target step body
+        step_body = ex["step_body"]
         
         # Build prompt with target (for SFT training)
         if self.use_xml_prompts:
-            full_text = build_prompt_with_target(problem, previous_steps, teacher_step)
+            full_text = build_srl_prompt_with_target(problem, previous_steps, step_body)
             # Extract just the prompt part (without target)
-            prompt = build_prompt(problem, previous_steps, include_closing_tag=False)
+            prompt = build_srl_prompt(problem, previous_steps, include_closing_tag=False)
         else:
-            # Legacy format (for backward compatibility)
-            from ..prompts import format_srl_prompt
+            # Legacy format
+            from ..shared.prompts import format_srl_prompt
             prompt = format_srl_prompt(
                 problem=problem,
                 previous_steps=previous_steps,
                 step_title=ex.get("step_title"),
             )
-            full_text = prompt + teacher_step
+            full_text = prompt + step_body
         
         # Tokenize full sequence
         enc_full = self.tokenizer(
@@ -104,7 +104,7 @@ class StepDataset(Dataset):
         )
         prompt_len = enc_prompt.input_ids.shape[-1]
         
-        # Create labels: -100 for prompt tokens, actual IDs for teacher_step tokens
+        # Create labels: -100 for prompt tokens, actual IDs for step_body tokens
         labels = input_ids.clone()
         labels[:prompt_len] = -100  # Ignore loss on prompt
         
@@ -170,4 +170,3 @@ class DataCollator:
             "input_ids": torch.tensor(padded_input_ids, dtype=torch.long),
             "labels": torch.tensor(padded_labels, dtype=torch.long),
         }
-

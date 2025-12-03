@@ -8,7 +8,7 @@ This document outlines all changes made to the codebase that are ready to be com
 
 ## 🔄 Modified Files (3 files)
 
-### 1. `srl_lib/__init__.py`
+### 1. `src/__init__.py`
 **Changes**: Added new exports for XML-style prompts, generation utilities, and SFT training components
 
 **Added Exports**:
@@ -20,7 +20,7 @@ This document outlines all changes made to the codebase that are ready to be com
 
 ---
 
-### 2. `srl_lib/data/__init__.py`
+### 2. `src/data/__init__.py`
 **Changes**: Added exports for new data utilities
 
 **Added Exports**:
@@ -31,7 +31,7 @@ This document outlines all changes made to the codebase that are ready to be com
 
 ---
 
-### 3. `srl_lib/prompts.py`
+### 3. `src/prompts.py`
 **Changes**: Added XML-style prompt functions while maintaining backward compatibility
 
 **Added Functions**:
@@ -87,18 +87,18 @@ This document outlines all changes made to the codebase that are ready to be com
 
 ### Library Code (4 files)
 
-#### 6. `srl_lib/data/dataset.py`
+#### 6. `src/data/dataset.py`
 - `StepDataset` class - PyTorch Dataset for SFT training
 - `DataCollator` class - Batches and pads sequences
 - Proper label masking (prompt tokens = -100)
 - Supports both XML and legacy prompts
 
-#### 7. `srl_lib/data/splits.py`
+#### 7. `src/data/splits.py`
 - `split_by_trajectory()` - Splits data by trajectory ID
 - `save_splits()` - Saves train/val/test to separate files
 - Prevents data leakage between splits
 
-#### 8. `srl_lib/generation.py`
+#### 8. `src/generation.py`
 - `generate_student_step()` - Generate single reasoning step
 - `generate_student_step_batch()` - Batch generation
 - `compute_token_logprobs()` - Compute log probabilities for RL training

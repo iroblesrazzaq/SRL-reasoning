@@ -1,9 +1,11 @@
 """Core vLLM evaluation engine for math benchmarks."""
 
+import gc
 import re
 import time
 from typing import List, Dict, Optional
 
+import torch
 import vllm
 from vllm import SamplingParams
 
@@ -221,7 +223,7 @@ class MathEvaluator:
     Handles both base models and SRL-trained models with appropriate prompts.
     """
     
-    def __init__(self, model_path: str, model_type: str = "srl"):
+    def __init__(self, model_path: str, model_type: str = "srl", gpu_memory_utilization: float = 0.8):
         """
         Initialize the evaluator with a vLLM model.
         
@@ -229,9 +231,16 @@ class MathEvaluator:
             model_path: Path to the model or HuggingFace model ID.
             model_type: Either "srl" (trained with think tags) or "base" (standard model).
                        Using the wrong prompt for the model type will lower scores.
+            gpu_memory_utilization: Fraction of GPU memory vLLM should reserve (default 0.8).
+                       Setting below 0.9 leaves headroom for other processes.
         """
         if model_type not in ("srl", "base"):
             raise ValueError(f"model_type must be 'srl' or 'base', got '{model_type}'")
+        
+        # Proactively clear GPU memory before vLLM initialization
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         self.model_path = model_path
         self.model_type = model_type
@@ -239,6 +248,7 @@ class MathEvaluator:
             model=model_path,
             dtype="bfloat16",
             trust_remote_code=True,
+            gpu_memory_utilization=gpu_memory_utilization,
         )
     
     def _get_prompt_template(self) -> str:

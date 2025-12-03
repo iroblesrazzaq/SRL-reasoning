@@ -12,21 +12,17 @@ Usage:
 import argparse
 import json
 import os
-import sys
-from pathlib import Path
 from typing import List, Dict, Any
 
 import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
+from peft import LoraConfig, TaskType, get_peft_model
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from srl_lib.rewards import compute_srl_reward
-from srl_lib.grpo_utils import dynamic_sampling_filter
-from srl_lib.prompts import format_srl_prompt
+from src.srl.rewards import compute_srl_reward
+from src.srl.grpo_utils import dynamic_sampling_filter
+from src.shared.prompts import format_srl_prompt
 
 
 def load_srl_dataset(data_path: str) -> Dataset:
@@ -55,12 +51,12 @@ def load_srl_dataset(data_path: str) -> Dataset:
             step_title=ex.get("step_title"),
         )
         
-        # The expert target is the step body
-        expert_target = ex["step_body"]
+        # The expert target is the step body: full teacher step without the step label
+        target = ex["step_body"]
         
         processed.append({
             "prompt": prompt,
-            "expert_target": expert_target,
+            "expert_target": target,
         })
     
     return Dataset.from_list(processed)
@@ -297,8 +293,8 @@ def main():
     parser.add_argument(
         "--optim",
         type=str,
-        default="adamw_torch",
-        help="Optimizer to use (e.g., adamw_torch, adamw_8bit)",
+        default="adamw_8bit",
+        help="Optimizer to use (e.g., adamw_8bit, adamw_torch)",
     )
     
     args = parser.parse_args()
@@ -324,6 +320,14 @@ def main():
         trust_remote_code=True,
         device_map="auto",
     )
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules="all-linear",
+        task_type=TaskType.CAUSAL_LM,
+    )
+    model = get_peft_model(model, lora_config)
     
     print(f"Loading dataset from: {args.data_path}")
     dataset = load_srl_dataset(args.data_path)
@@ -361,7 +365,7 @@ def main():
         model=model,
         args=grpo_config,
         train_dataset=dataset,
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
         reward_funcs=reward_fn,
         filter_epsilon=args.filter_epsilon,
     )
@@ -379,4 +383,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

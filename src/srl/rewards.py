@@ -34,7 +34,7 @@ def compute_srl_reward(model_completion: str, expert_target: str) -> float:
     
     # Handle division by zero (both strings are empty)
     if total_length == 0:
-        return 1.0  # Two empty strings are considered a perfect match
+        return 0.0  # Avoid rewarding empty actions; treat as no signal
     
     # Use SequenceMatcher to find matching blocks
     matcher = difflib.SequenceMatcher(None, pred_action, expert_target)

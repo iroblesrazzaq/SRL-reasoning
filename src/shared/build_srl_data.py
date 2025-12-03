@@ -200,23 +200,23 @@ def build_srl_examples(traj: Dict) -> Iterable[Dict]:
 
     This corresponds to the SRL idea where the student model sees the problem
     and all previous reasoning steps, then must predict the next step. The
-    teacher's step serves as the target label for supervised learning.
+    step_body serves as the target label for supervised learning.
 
     Given one normalized trajectory:
         { "id": ..., "problem": ..., "steps": [{step_num, step_title, step_body}, ...] }
 
     This produces N examples (one for each step):
 
-      k = 0: previous_steps = [],        teacher_step = S1
-      k = 1: previous_steps = [S1],      teacher_step = S2
+      k = 0: previous_steps = [],        step_body = S1
+      k = 1: previous_steps = [S1],      step_body = S2
       ...
-      k = N-1: previous_steps = [S1..S_{N-1}], teacher_step = SN
+      k = N-1: previous_steps = [S1..S_{N-1}], step_body = SN
 
     Args:
         traj: Normalized trajectory dict with "id", "problem", and "steps"
 
     Yields:
-        Dict with keys: traj_id, step_idx, problem, previous_steps, step_title, step_body, teacher_step
+        Dict with keys: traj_id, step_idx, problem, previous_steps, step_title, step_body
     """
     problem = traj["problem"]
     steps = traj["steps"]
@@ -230,9 +230,6 @@ def build_srl_examples(traj: Dict) -> Iterable[Dict]:
             prev_steps_formatted.append(formatted)
         
         current_step = steps[k]
-        
-        # teacher_step is the full formatted step for backward compatibility
-        teacher_step = f"{current_step['step_num']}. **{current_step['step_title']}**: {current_step['step_body']}"
 
         yield {
             "traj_id": tid,
@@ -241,7 +238,6 @@ def build_srl_examples(traj: Dict) -> Iterable[Dict]:
             "previous_steps": prev_steps_formatted,
             "step_title": current_step["step_title"],
             "step_body": current_step["step_body"],
-            "teacher_step": teacher_step,
         }
 
 
@@ -285,7 +281,7 @@ def main():
     CLI entrypoint: Load dataset, normalize trajectories, build SRL examples, and save.
 
     Usage:
-        python -m srl_lib.data.build_srl_data
+        python -m src.shared.build_srl_data
         or
         srl-build-data
 

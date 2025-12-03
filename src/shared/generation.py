@@ -8,7 +8,7 @@ from typing import List, Dict, Optional, Tuple
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedModel
 
-from .prompts import build_prompt, STOP_TOKENS, extract_next_step_from_output
+from .prompts import build_srl_prompt, STOP_TOKENS, extract_next_step_from_output
 
 
 def generate_student_step(
@@ -60,7 +60,7 @@ def generate_student_step(
         stop_tokens = STOP_TOKENS
     
     # Build the prompt (XML-style)
-    prompt = build_prompt(problem, previous_steps, include_closing_tag=False)
+    prompt = build_srl_prompt(problem, previous_steps, include_closing_tag=False)
     
     # Tokenize the prompt
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(model.device)
@@ -185,7 +185,7 @@ def generate_student_step_batch(
     
     # Build prompts for all problems
     prompts = [
-        build_prompt(problem, prev_steps, include_closing_tag=False)
+        build_srl_prompt(problem, prev_steps, include_closing_tag=False)
         for problem, prev_steps in zip(problems, previous_steps_list)
     ]
     
@@ -230,4 +230,3 @@ def generate_student_step_batch(
         results.append((generated_step, metadata))
     
     return results
-
