@@ -356,33 +356,43 @@ def main():
     reward_fn = create_reward_function(tokenizer)
     
     # Configure GRPO training
-    # Note: max_new_tokens is not a parameter of GRPOConfig
-    # Generation length is controlled by max_length in the config
-    # The actual generation uses vLLM which respects max_length
-    grpo_config = GRPOConfig(
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        save_strategy=args.save_strategy,
-        save_total_limit=args.save_total_limit,
-        optim=args.optim,
-        bf16=args.bf16,
-        seed=args.seed,
-        # GRPO-specific settings
-        num_generations=args.num_generations,  # k rollouts per prompt
-        max_length=args.max_length,  # Controls generation length
-        # Note: max_new_tokens is handled internally by vLLM/TRL
-        # The generation will respect max_length - prompt_length
-    )
+    # Note: GRPOConfig may not accept max_length or max_new_tokens
+    # These are typically handled by the trainer or vLLM internally
+    # Build config with only supported parameters
+    grpo_config_dict = {
+        "output_dir": args.output_dir,
+        "num_train_epochs": args.num_train_epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "save_strategy": args.save_strategy,
+        "save_total_limit": args.save_total_limit,
+        "optim": args.optim,
+        "bf16": args.bf16,
+        "seed": args.seed,
+        "num_generations": args.num_generations,  # k rollouts per prompt
+    }
+    
+    # Try to add max_length if supported
+    import inspect
+    sig = inspect.signature(GRPOConfig.__init__)
+    if 'max_length' in sig.parameters:
+        grpo_config_dict["max_length"] = args.max_length
+    if 'max_new_tokens' in sig.parameters:
+        grpo_config_dict["max_new_tokens"] = args.max_new_tokens
+    
+    grpo_config = GRPOConfig(**grpo_config_dict)
     
     print("Initializing GRPO Trainer...")
     print(f"  num_generations: {args.num_generations}")
-    print(f"  max_length: {args.max_length}")
-    print(f"  (max_new_tokens={args.max_new_tokens} will be approximated by max_length)")
+    if 'max_length' in grpo_config_dict:
+        print(f"  max_length: {args.max_length}")
+    if 'max_new_tokens' in grpo_config_dict:
+        print(f"  max_new_tokens: {args.max_new_tokens}")
+    if 'max_length' not in grpo_config_dict and 'max_new_tokens' not in grpo_config_dict:
+        print(f"  Note: Generation length controlled by vLLM defaults")
     
     # Initialize trainer with dynamic sampling
     trainer = SRLGRPOTrainer(
