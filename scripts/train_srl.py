@@ -136,12 +136,23 @@ class SRLGRPOTrainer(GRPOTrainer):
             Tensor of advantages with same shape.
         """
         # Get the mask for samples with meaningful variance
-        mask = dynamic_sampling_filter(rewards, epsilon=self.filter_epsilon)
+        # If filter_epsilon is None or very large, disable filtering
+        if self.filter_epsilon is None or self.filter_epsilon >= 1.0:
+            # Disable filtering - keep all samples
+            mask = torch.ones(rewards.size(0), dtype=torch.bool, device=rewards.device)
+        else:
+            mask = dynamic_sampling_filter(rewards, epsilon=self.filter_epsilon)
         
         # Track statistics for logging
         kept = mask.sum().item()
         total = mask.size(0)
         self._last_filter_stats = {"kept": kept, "total": total}
+        
+        # Log warning if too many samples are filtered
+        if kept == 0 and total > 0:
+            print(f"⚠️  WARNING: All {total} samples filtered out (zero reward variance). "
+                  f"Consider disabling filter (set --filter_epsilon to None or >= 1.0) "
+                  f"or check if model is generating proper format.")
         
         # Compute base advantages using parent method
         # GRPO normalizes rewards per-group: A_i = (r_i - mean(r)) / std(r)
@@ -398,12 +409,15 @@ def main():
     # Initialize trainer with dynamic sampling
     # Note: GRPOTrainer may not accept tokenizer directly
     # It may extract it from the model or config
+    # Handle filter_epsilon: allow None to disable filtering
+    filter_epsilon = args.filter_epsilon if args.filter_epsilon is not None else None
+    
     trainer_kwargs = {
         "model": model,
         "args": grpo_config,
         "train_dataset": dataset,
         "reward_funcs": reward_fn,
-        "filter_epsilon": args.filter_epsilon,  # For SRLGRPOTrainer
+        "filter_epsilon": filter_epsilon,  # For SRLGRPOTrainer
     }
     
     # Try to add tokenizer if supported by GRPOTrainer
