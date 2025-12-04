@@ -373,6 +373,7 @@ def main():
         "bf16": args.bf16,
         "seed": args.seed,
         "num_generations": args.num_generations,  # k rollouts per prompt
+        "report_to": "none",  # Disable wandb/tensorboard by default for non-interactive runs
     }
     
     # Try to add max_length if supported
