@@ -395,14 +395,23 @@ def main():
         print(f"  Note: Generation length controlled by vLLM defaults")
     
     # Initialize trainer with dynamic sampling
-    trainer = SRLGRPOTrainer(
-        model=model,
-        args=grpo_config,
-        train_dataset=dataset,
-        tokenizer=tokenizer,
-        reward_funcs=reward_fn,
-        filter_epsilon=args.filter_epsilon,
-    )
+    # Note: GRPOTrainer may not accept tokenizer directly
+    # It may extract it from the model or config
+    trainer_kwargs = {
+        "model": model,
+        "args": grpo_config,
+        "train_dataset": dataset,
+        "reward_funcs": reward_fn,
+        "filter_epsilon": args.filter_epsilon,  # For SRLGRPOTrainer
+    }
+    
+    # Try to add tokenizer if supported by GRPOTrainer
+    import inspect
+    sig = inspect.signature(GRPOTrainer.__init__)
+    if 'tokenizer' in sig.parameters:
+        trainer_kwargs["tokenizer"] = tokenizer
+    
+    trainer = SRLGRPOTrainer(**trainer_kwargs)
     
     print("Starting training...")
     trainer.train()
