@@ -25,9 +25,6 @@ from transformers import (
 from peft import LoraConfig, TaskType, get_peft_model
 
 from src.sft.dataset import StepDataset, DataCollator
-import difflib
-from src.shared.formatting import parse_model_output
-from src.srl.rewards import compute_srl_reward
 
 
 def main():
@@ -321,83 +318,10 @@ def main():
     
     training_args = TrainingArguments(**training_args_dict)
     
-    # Define similarity-based metrics for evaluation
-    # Note: This requires decoding full sequences, which can be memory-intensive
-    # Currently disabled to avoid OOM, but can be enabled if needed
-    def compute_similarity_metrics(eval_preds):
-        """
-        Compute similarity metrics between predictions and targets using SequenceMatcher.
-        
-        Uses the same similarity metric as GRPO rewards (R = (2 * M) / T).
-        This provides a better measure of quality than just token-level accuracy.
-        """
-        predictions, labels = eval_preds
-        
-        # predictions shape: (batch_size, seq_len, vocab_size) - logits
-        # labels shape: (batch_size, seq_len) - token IDs or -100 for masked
-        
-        # Get predicted token IDs (argmax)
-        pred_ids = predictions.argmax(axis=-1)  # (batch_size, seq_len)
-        
-        # Decode full sequences for similarity comparison
-        similarities = []
-        format_errors = 0
-        token_accuracies = []
-        
-        for i in range(pred_ids.shape[0]):
-            # Decode predicted sequence (skip special tokens)
-            pred_tokens = pred_ids[i]
-            label_tokens = labels[i]
-            
-            # Find where target starts (first non-masked token)
-            mask = label_tokens != -100
-            if mask.sum() == 0:
-                continue
-            
-            # Decode only the target portion (non-masked tokens)
-            pred_target_ids = pred_tokens[mask].tolist()
-            label_target_ids = label_tokens[mask].tolist()
-            
-            # Decode to strings for similarity comparison
-            pred_text = tokenizer.decode(pred_target_ids, skip_special_tokens=True)
-            label_text = tokenizer.decode(label_target_ids, skip_special_tokens=True)
-            
-            # Compute similarity using same method as GRPO
-            # Parse model output to extract action (if format is correct)
-            thought, pred_action = parse_model_output(f"<think></think>\n{pred_text}")
-            
-            if pred_action is None:
-                format_errors += 1
-                # If format is wrong, similarity is 0
-                similarities.append(0.0)
-            else:
-                # Use SequenceMatcher (same as GRPO)
-                matcher = difflib.SequenceMatcher(None, pred_action, label_text)
-                matching_blocks = matcher.get_matching_blocks()
-                matching_length = sum(match.size for match in matching_blocks)
-                total_length = len(pred_action) + len(label_text)
-                
-                if total_length > 0:
-                    similarity = (2.0 * matching_length) / total_length
-                else:
-                    similarity = 0.0
-                similarities.append(similarity)
-            
-            # Also compute token-level accuracy
-            correct = (pred_target_ids == label_target_ids).sum()
-            token_acc = correct / len(label_target_ids) if len(label_target_ids) > 0 else 0.0
-            token_accuracies.append(token_acc)
-        
-        return {
-            "similarity_mean": sum(similarities) / len(similarities) if similarities else 0.0,
-            "token_accuracy": sum(token_accuracies) / len(token_accuracies) if token_accuracies else 0.0,
-            "format_error_rate": format_errors / len(similarities) if similarities else 0.0,
-        }
-    
     # Initialize trainer
     # Note: We use prediction_loss_only=True in training_args to avoid OOM during eval
     # This means we only compute loss, not full predictions/logits
-    # However, we can still compute token-level metrics without full decoding
+    # SFT uses standard cross-entropy loss (language modeling loss) as described in the paper
     trainer = Trainer(
         model=model,
         args=training_args,
