@@ -95,18 +95,40 @@ class StepDataset(Dataset):
         )
         input_ids = enc_full.input_ids[0]  # [L]
         
-        # Tokenize prompt to find boundary
+        # Tokenize prompt separately to find boundary
+        # Use add_special_tokens=False to match the full_text tokenization
         enc_prompt = self.tokenizer(
             prompt,
             truncation=True,
             max_length=self.max_length,
             return_tensors="pt",
+            add_special_tokens=False,  # Don't add special tokens again
         )
         prompt_len = enc_prompt.input_ids.shape[-1]
+        
+        # Ensure we have at least some target tokens (avoid all-masked labels)
+        # This prevents NaN loss when truncation removes all step_body tokens
+        actual_input_len = input_ids.shape[0]
+        if prompt_len >= actual_input_len:
+            # All tokens are prompt - truncation removed all step_body
+            # Keep at least the last token as a label to avoid NaN loss
+            prompt_len = max(0, actual_input_len - 1)
+            # Warn if this happens frequently (but don't spam)
+            import warnings
+            warnings.warn(
+                f"Truncation removed all target tokens. Keeping last token as label. "
+                f"Consider increasing max_length (current: {self.max_length})",
+                UserWarning,
+            )
         
         # Create labels: -100 for prompt tokens, actual IDs for step_body tokens
         labels = input_ids.clone()
         labels[:prompt_len] = -100  # Ignore loss on prompt
+        
+        # Final safety check: ensure at least one non-masked token exists
+        if (labels == -100).all():
+            # If somehow all tokens are masked, keep the last one
+            labels[-1] = input_ids[-1]
         
         return {
             "input_ids": input_ids,
