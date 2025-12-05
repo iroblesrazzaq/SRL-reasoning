@@ -275,8 +275,9 @@ class MathEvaluator:
         """
         # Build prompts using appropriate template
         prompt_template = self._get_prompt_template()
+        # Use simple replacement to avoid brace conflicts with templates like \boxed{}
         prompts = [
-            prompt_template.format(problem=item['problem'])
+            prompt_template.replace("{problem}", item["problem"])
             for item in data
         ]
         
