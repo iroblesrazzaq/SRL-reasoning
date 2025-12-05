@@ -8,7 +8,7 @@ from datasets import load_dataset
 BENCHMARK_CONFIGS = {
     "amc23": ("AI-MO/aimo-validation-amc", "train"),
     "aime24": ("AI-MO/aimo-validation-aime", "train"),
-    "aime25": ("math-ai/aime25", "train"),
+    "aime25": ("math-ai/aime25", "test"),  # dataset only provides test split
 }
 
 
@@ -74,4 +74,3 @@ def _extract_solution(item: Dict) -> str:
             return str(value)
     
     raise KeyError(f"Could not find solution field in item: {list(item.keys())}")
-

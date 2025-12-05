@@ -18,11 +18,10 @@ Question: {problem}
 <think>"""
 
 # Prompt template for base models (no think tags expected)
-BASE_PROMPT_TEMPLATE = """You are a helpful assistant for solving mathematical problems. Solve the problem step by step and provide your final answer in \\boxed{{}}.
+# Qwen evaluation style: append the CoT hint after the question text.
+BASE_PROMPT_TEMPLATE = """Problem: {problem}
 
-Question: {problem}
-
-Solution:"""
+Please reason step by step, and put your final answer within \\boxed{}."""
 
 # Backward compatibility alias
 PROMPT_TEMPLATE = SRL_PROMPT_TEMPLATE
@@ -333,4 +332,3 @@ class MathEvaluator:
         
         # Return mean score
         return sum(scores) / len(scores) if scores else 0.0
-
