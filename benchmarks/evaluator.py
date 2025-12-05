@@ -4,6 +4,7 @@ import gc
 import re
 import time
 from typing import List, Dict, Optional
+from tqdm import tqdm
 
 import torch
 import vllm
@@ -310,7 +311,8 @@ class MathEvaluator:
         
         # Score outputs
         scores = []
-        for i, output in enumerate(outputs):
+        # Wrap outputs with tqdm for a progress bar
+        for i, output in enumerate(tqdm(outputs, desc="Scoring")):
             truth = data[i]['solution']
             
             if mode == 'greedy':
