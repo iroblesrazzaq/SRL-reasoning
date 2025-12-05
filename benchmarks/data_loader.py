@@ -7,7 +7,8 @@ from datasets import load_dataset
 # Dataset mappings: benchmark_name -> (dataset_id, split)
 BENCHMARK_CONFIGS = {
     "amc23": ("AI-MO/aimo-validation-amc", "train"),
-    "aime24": ("AI-MO/aimo-validation-aime", "train"),
+    # Use the original ~30-problem AIME 2024 set (not the 90-problem validation mix).
+    "aime24": ("math-ai/aime24", "test"),
     "aime25": ("math-ai/aime25", "test"),  # dataset only provides test split
 }
 
