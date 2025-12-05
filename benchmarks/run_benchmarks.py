@@ -3,9 +3,12 @@
 
 import argparse
 import sys
+import time
+from pathlib import Path
 
 from .data_loader import load_benchmark_data
 from .evaluator import MathEvaluator
+from .results import BenchmarkResult
 
 
 def main():
@@ -32,8 +35,21 @@ def main():
         default="greedy",
         help="Evaluation mode: 'greedy' (single sample) or 'avg32' (32 samples).",
     )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default=None,
+        help="Optional display name for the model (defaults to basename of model_path).",
+    )
+    parser.add_argument(
+        "--results_dir",
+        type=str,
+        default="benchmarks/results",
+        help="Directory to store serialized benchmark results.",
+    )
     
     args = parser.parse_args()
+    model_display = args.model_name or Path(args.model_path).name
     
     # Load benchmark data
     print(f"Loading {args.benchmark}...")
@@ -54,17 +70,30 @@ def main():
     
     # Run evaluation
     print(f"Evaluating with mode={args.mode}...")
+    start = time.time()
     try:
         score = evaluator.evaluate(data, mode=args.mode)
     except Exception as e:
         print(f"Error during evaluation: {e}", file=sys.stderr)
         sys.exit(1)
+    elapsed = time.time() - start
     
     # Print result
     print()
     print(f"[RESULT] Benchmark: {args.benchmark} | Mode: {args.mode} | Score: {score:.2%}")
+    benchmark_type = "Avg@32" if args.mode == "avg32" else "Greedy"
+    result = BenchmarkResult(
+        benchmark=args.benchmark,
+        benchmark_type=benchmark_type,
+        score=score,
+        model_name=model_display,
+        model_path=args.model_path,
+        num_questions=len(data),
+        eval_time_seconds=elapsed,
+    )
+    saved_path = result.save(args.results_dir)
+    print(f"Saved result to {saved_path}")
 
 
 if __name__ == "__main__":
     main()
-
