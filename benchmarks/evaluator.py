@@ -1,6 +1,7 @@
 """Core vLLM evaluation engine for math benchmarks."""
 
 import gc
+import math
 import re
 import time
 from typing import List, Dict, Optional
@@ -209,10 +210,13 @@ def _normalize_answer(answer: str) -> str:
     # Try to simplify floats like "1.0" to "1"
     try:
         num = float(answer)
+        # Handle infinity and NaN
+        if not math.isfinite(num):
+            return answer  # Return original if infinity or NaN
         if num == int(num):
             return str(int(num))
         return str(num)
-    except ValueError:
+    except (ValueError, OverflowError):
         pass
     
     return answer
