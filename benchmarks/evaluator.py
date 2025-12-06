@@ -247,49 +247,66 @@ class MathEvaluator:
         self.model_path = model_path
         self.model_type = model_type
         
-        # Try to initialize vLLM, with repair fallback if needed
-        try:
-            self.llm = vllm.LLM(
-                model=model_path,
-                dtype="bfloat16",
-                trust_remote_code=True,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
-        except (AttributeError, TypeError, ValueError) as e:
-            # Check if error is related to config/tokenizer loading
-            error_str = str(e).lower()
-            if ("model_type" in error_str or "config" in error_str or "tokenizer" in error_str) and base_model:
-                import warnings
-                from pathlib import Path
-                from transformers import AutoConfig, AutoTokenizer
+        # Proactively check and repair config/tokenizer files if base_model is provided
+        # This prevents errors during vLLM initialization
+        if base_model:
+            from pathlib import Path
+            import json
+            
+            model_dir = Path(model_path)
+            if model_dir.exists() and model_dir.is_dir():
+                config_path = model_dir / "config.json"
+                # Check if config.json exists and has model_type field
+                needs_repair = False
                 
-                warnings.warn(
-                    f"Failed to load model due to config/tokenizer issue. "
-                    f"Attempting to repair using base model '{base_model}'...",
-                    UserWarning
-                )
+                if config_path.exists():
+                    try:
+                        with config_path.open("r", encoding="utf-8") as f:
+                            config = json.load(f)
+                        if not isinstance(config, dict) or "model_type" not in config:
+                            needs_repair = True
+                    except (json.JSONDecodeError, IOError):
+                        needs_repair = True
+                else:
+                    needs_repair = True
                 
-                model_dir = Path(model_path)
-                if model_dir.exists() and model_dir.is_dir():
+                # Also check tokenizer_config.json
+                tok_config_path = model_dir / "tokenizer_config.json"
+                if tok_config_path.exists():
+                    try:
+                        with tok_config_path.open("r", encoding="utf-8") as f:
+                            tok_config = json.load(f)
+                        # tokenizer_config.json should NOT have model_type field
+                        if isinstance(tok_config, dict) and "model_type" in tok_config:
+                            needs_repair = True
+                    except (json.JSONDecodeError, IOError):
+                        needs_repair = True
+                
+                if needs_repair:
+                    import warnings
+                    from transformers import AutoConfig, AutoTokenizer
+                    
+                    warnings.warn(
+                        f"Detected potential config/tokenizer issues. "
+                        f"Repairing using base model '{base_model}'...",
+                        UserWarning
+                    )
+                    
                     # Repair config and tokenizer
                     print(f"Repairing config/tokenizer files in {model_dir}...")
                     base_config = AutoConfig.from_pretrained(base_model, trust_remote_code=True)
                     base_tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
                     base_config.save_pretrained(model_dir)
                     base_tokenizer.save_pretrained(model_dir)
-                    print("✓ Repair complete. Retrying vLLM initialization...")
-                    
-                    # Retry initialization
-                    self.llm = vllm.LLM(
-                        model=model_path,
-                        dtype="bfloat16",
-                        trust_remote_code=True,
-                        gpu_memory_utilization=gpu_memory_utilization,
-                    )
-                else:
-                    raise
-            else:
-                raise
+                    print("✓ Repair complete.")
+        
+        # Initialize vLLM
+        self.llm = vllm.LLM(
+            model=model_path,
+            dtype="bfloat16",
+            trust_remote_code=True,
+            gpu_memory_utilization=gpu_memory_utilization,
+        )
     
     def _get_prompt_template(self) -> str:
         """Get the appropriate prompt template based on model type."""
