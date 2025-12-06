@@ -47,6 +47,25 @@ def main():
         default="benchmarks/results",
         help="Directory to store serialized benchmark results.",
     )
+    parser.add_argument(
+        "--base_model",
+        type=str,
+        default=None,
+        help="Optional base model ID for repairing corrupted config/tokenizer files.",
+    )
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        choices=["srl", "base"],
+        default="srl",
+        help="Model type: 'srl' (trained with think tags) or 'base' (standard model).",
+    )
+    parser.add_argument(
+        "--gpu_memory_utilization",
+        type=float,
+        default=0.8,
+        help="Fraction of GPU memory vLLM should reserve (default: 0.8).",
+    )
     
     args = parser.parse_args()
     model_display = args.model_name or Path(args.model_path).name
@@ -63,7 +82,12 @@ def main():
     # Initialize evaluator
     print(f"Initializing vLLM with {args.model_path}...")
     try:
-        evaluator = MathEvaluator(args.model_path)
+        evaluator = MathEvaluator(
+            args.model_path,
+            model_type=args.model_type,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            base_model=args.base_model,
+        )
     except Exception as e:
         print(f"Error initializing model: {e}", file=sys.stderr)
         sys.exit(1)

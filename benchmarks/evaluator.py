@@ -12,9 +12,12 @@ from vllm.sampling_params import SamplingParams
 
 
 # Prompt template for SRL-trained models (with think tags)
+# Matches the format used in training (src/shared/prompts.py)
 SRL_PROMPT_TEMPLATE = """You are a helpful assistant for solving mathematical problems. A user will provide a math problem, which may include a partial solution. Your task is to continue the solution by providing the very next logical step. You should first draft your thinking process (inner monologue). Then, generate the solution. Your response format must follow the template below: <think> Your thoughts... </think> Provide only the single, next step to continue the solution.
 
-Question: {problem}
+Problem:
+{problem}
+
 <think>"""
 
 # Prompt template for base models (no think tags expected)
@@ -301,12 +304,37 @@ class MathEvaluator:
                     print("✓ Repair complete.")
         
         # Initialize vLLM
-        self.llm = vllm.LLM(
-            model=model_path,
-            dtype="bfloat16",
-            trust_remote_code=True,
-            gpu_memory_utilization=gpu_memory_utilization,
-        )
+        # Note: If you encounter 'dict' object has no attribute 'model_type' error,
+        # this is a known transformers/vLLM compatibility issue. Workarounds:
+        # 1. Use base model tokenizer (tokenizer doesn't change during fine-tuning)
+        # 2. Update/downgrade transformers or vLLM versions
+        # 3. Load tokenizer from base model before vLLM initialization
+        try:
+            self.llm = vllm.LLM(
+                model=model_path,
+                dtype="bfloat16",
+                trust_remote_code=True,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+        except AttributeError as e:
+            if "'dict' object has no attribute 'model_type'" in str(e):
+                error_msg = (
+                    f"\n{'='*80}\n"
+                    f"ERROR: Tokenizer loading failed due to transformers/vLLM compatibility issue.\n"
+                    f"This is a known issue where transformers loads config as dict instead of config object.\n\n"
+                    f"WORKAROUNDS:\n"
+                    f"1. Load tokenizer from base model before benchmarking:\n"
+                    f"   from transformers import AutoTokenizer\n"
+                    f"   tokenizer = AutoTokenizer.from_pretrained('{base_model if base_model else 'BASE_MODEL_ID'}')\n"
+                    f"   tokenizer.save_pretrained('{model_path}')\n\n"
+                    f"2. Update/downgrade versions:\n"
+                    f"   !pip install transformers==4.40.0  # or compatible version\n"
+                    f"   !pip install vllm==0.4.0  # or compatible version\n\n"
+                    f"3. Use HuggingFace model ID instead of local path if available.\n"
+                    f"{'='*80}\n"
+                )
+                raise RuntimeError(error_msg) from e
+            raise
     
     def _get_prompt_template(self) -> str:
         """Get the appropriate prompt template based on model type."""
