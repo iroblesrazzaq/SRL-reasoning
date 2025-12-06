@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 import torch
 import vllm
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 
 
 # Prompt template for SRL-trained models (with think tags)
