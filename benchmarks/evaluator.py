@@ -223,7 +223,7 @@ class MathEvaluator:
     Handles both base models and SRL-trained models with appropriate prompts.
     """
     
-    def __init__(self, model_path: str, model_type: str = "srl", gpu_memory_utilization: float = 0.8):
+    def __init__(self, model_path: str, model_type: str = "srl", gpu_memory_utilization: float = 0.8, base_model: Optional[str] = None):
         """
         Initialize the evaluator with a vLLM model.
         
@@ -233,6 +233,8 @@ class MathEvaluator:
                        Using the wrong prompt for the model type will lower scores.
             gpu_memory_utilization: Fraction of GPU memory vLLM should reserve (default 0.8).
                        Setting below 0.9 leaves headroom for other processes.
+            base_model: Optional base model ID to use for repairing corrupted config/tokenizer files.
+                       If provided and loading fails, will attempt to repair the merged model.
         """
         if model_type not in ("srl", "base"):
             raise ValueError(f"model_type must be 'srl' or 'base', got '{model_type}'")
@@ -244,12 +246,50 @@ class MathEvaluator:
         
         self.model_path = model_path
         self.model_type = model_type
-        self.llm = vllm.LLM(
-            model=model_path,
-            dtype="bfloat16",
-            trust_remote_code=True,
-            gpu_memory_utilization=gpu_memory_utilization,
-        )
+        
+        # Try to initialize vLLM, with repair fallback if needed
+        try:
+            self.llm = vllm.LLM(
+                model=model_path,
+                dtype="bfloat16",
+                trust_remote_code=True,
+                gpu_memory_utilization=gpu_memory_utilization,
+            )
+        except (AttributeError, TypeError, ValueError) as e:
+            # Check if error is related to config/tokenizer loading
+            error_str = str(e).lower()
+            if ("model_type" in error_str or "config" in error_str or "tokenizer" in error_str) and base_model:
+                import warnings
+                from pathlib import Path
+                from transformers import AutoConfig, AutoTokenizer
+                
+                warnings.warn(
+                    f"Failed to load model due to config/tokenizer issue. "
+                    f"Attempting to repair using base model '{base_model}'...",
+                    UserWarning
+                )
+                
+                model_dir = Path(model_path)
+                if model_dir.exists() and model_dir.is_dir():
+                    # Repair config and tokenizer
+                    print(f"Repairing config/tokenizer files in {model_dir}...")
+                    base_config = AutoConfig.from_pretrained(base_model, trust_remote_code=True)
+                    base_tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+                    base_config.save_pretrained(model_dir)
+                    base_tokenizer.save_pretrained(model_dir)
+                    print("✓ Repair complete. Retrying vLLM initialization...")
+                    
+                    # Retry initialization
+                    self.llm = vllm.LLM(
+                        model=model_path,
+                        dtype="bfloat16",
+                        trust_remote_code=True,
+                        gpu_memory_utilization=gpu_memory_utilization,
+                    )
+                else:
+                    raise
+            else:
+                raise
     
     def _get_prompt_template(self) -> str:
         """Get the appropriate prompt template based on model type."""

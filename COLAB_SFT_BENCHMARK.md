@@ -67,6 +67,9 @@ print(f"  Results: {DRIVE_RESULTS_DIR}")
 # Path to your trained SFT model (update this!)
 SFT_MODEL_PATH = "/content/drive/MyDrive/srl_outputs/sft_model"  # ⚠️ UPDATE THIS!
 
+# Base model ID (used for repairing corrupted config/tokenizer files if needed)
+BASE_MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"  # Update if using a different base model
+
 # Model display name (for results)
 SFT_MODEL_NAME = "SFT-7B"  # Change if needed
 
@@ -81,10 +84,40 @@ MODES = ["greedy", "avg32"]  # Greedy = single sample, avg32 = 32 samples with m
 
 print("✓ Configuration loaded")
 print(f"  SFT Model: {SFT_MODEL_PATH}")
+print(f"  Base Model: {BASE_MODEL_ID}")
 print(f"  Model exists: {Path(SFT_MODEL_PATH).exists()}")
 ```
 
-## Cell 4: Benchmark SFT Model
+## Cell 4 (Optional): Repair Model Config/Tokenizer
+
+**Run this cell if you get `AttributeError: 'dict' object has no attribute 'model_type'` when initializing vLLM.**
+
+```python
+# ============================================================================
+# Repair Model Config/Tokenizer (Optional - only if you get config errors)
+# ============================================================================
+# This fixes corrupted config.json or tokenizer files in merged models
+
+from transformers import AutoConfig, AutoTokenizer
+
+if Path(SFT_MODEL_PATH).exists():
+    print(f"Repairing config/tokenizer files in: {SFT_MODEL_PATH}")
+    print(f"Using base model: {BASE_MODEL_ID}")
+    
+    # Load clean config and tokenizer from base model
+    base_config = AutoConfig.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
+    base_tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
+    
+    # Save to merged model directory (overwrites corrupted files)
+    base_config.save_pretrained(SFT_MODEL_PATH)
+    base_tokenizer.save_pretrained(SFT_MODEL_PATH)
+    
+    print("✓ Repair complete! You can now proceed to benchmarking.")
+else:
+    print(f"❌ Model path does not exist: {SFT_MODEL_PATH}")
+```
+
+## Cell 5: Benchmark SFT Model
 
 ```python
 # ============================================================================
@@ -107,7 +140,8 @@ else:
     evaluator_sft = MathEvaluator(
         SFT_MODEL_PATH,
         model_type="srl",  # SFT models are trained with <think> tags
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        base_model=BASE_MODEL_ID  # For auto-repair if config/tokenizer files are corrupted
     )
     
     print("✓ Model loaded successfully\n")
@@ -153,7 +187,7 @@ else:
     print("=" * 80)
 ```
 
-## Cell 5: View Results
+## Cell 6: View Results
 
 ```python
 # ============================================================================
