@@ -338,6 +338,9 @@ class MathEvaluator:
         print("=" * 80)
         print("MODIFYING MODEL CONFIG FOR MEMORY EFFICIENCY")
         print("=" * 80)
+        print(f"DEBUG: model_path = {model_path}")
+        print(f"DEBUG: config_path = {config_path}")
+        print(f"DEBUG: config_path.exists() = {config_path.exists()}")
         
         if config_path.exists():
             # Read and modify config
