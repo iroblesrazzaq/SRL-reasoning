@@ -318,16 +318,25 @@ class MathEvaluator:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            print(f"GPU memory before vLLM: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB allocated, "
-                  f"{torch.cuda.memory_reserved(0) / 1e9:.2f} GB reserved")
+            allocated = torch.cuda.memory_allocated(0) / 1e9
+            reserved = torch.cuda.memory_reserved(0) / 1e9
+            total = torch.cuda.get_device_properties(0).total_memory / 1e9
+            free = total - reserved
+            print(f"GPU memory before vLLM:")
+            print(f"  Allocated: {allocated:.2f} GB")
+            print(f"  Reserved: {reserved:.2f} GB")
+            print(f"  Free: {free:.2f} GB")
+            print(f"  vLLM will request: {gpu_memory_utilization * total:.2f} GB ({gpu_memory_utilization * 100:.0f}%)")
         
         try:
+            print("Initializing vLLM engine (this may take a minute)...")
             self.llm = vllm.LLM(
                 model=model_path,
                 dtype="bfloat16",
                 trust_remote_code=True,
                 gpu_memory_utilization=gpu_memory_utilization,
             )
+            print("✓ vLLM engine initialized successfully!")
         except RuntimeError as e:
             # Check if it's the engine initialization error
             if "Engine core initialization failed" in str(e):
