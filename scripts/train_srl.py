@@ -257,6 +257,12 @@ def main():
         default="flash_attention_2",
         help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'flash_attention_2' for optimal performance.",
     )
+    parser.add_argument(
+        "--use_8bit",
+        action="store_true",
+        default=False,
+        help="Use 8-bit quantization (may conflict with LoRA, disabled by default)",
+    )
     
     # Training arguments (matching paper defaults for 7B, adjusted for 4B)
     parser.add_argument(
@@ -268,14 +274,14 @@ def main():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=2,
+        default=1,
         help="Batch size per device (reduced for memory efficiency, paper: 8 for 7B/A100 80GB)",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=256,
-        help="Gradient accumulation steps (increased to maintain total batch size = 2 * 256 = 512)",
+        default=512,
+        help="Gradient accumulation steps (increased to maintain total batch size = 1 * 512 = 512)",
     )
     parser.add_argument(
         "--learning_rate",
@@ -446,37 +452,40 @@ def main():
     
     # Load model
     print(f"Loading model: {args.model_name}")
-    # Use BitsAndBytesConfig for 8-bit quantization to reduce memory
-    from transformers import BitsAndBytesConfig
     
-    quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True,
-        llm_int8_threshold=6.0,
-    )
+    # 8-bit quantization conflicts with LoRA, so we disable it by default
+    # Instead, we rely on bfloat16, gradient checkpointing, and smaller batch sizes
+    model_kwargs = {
+        "torch_dtype": torch.bfloat16 if args.bf16 else torch.float32,
+        "trust_remote_code": True,
+        "device_map": "auto",
+        "attn_implementation": args.attn_implementation,
+    }
     
-    # Note: 8-bit quantization may not work with flash_attention_2
-    # If using quantization, fall back to sdpa if flash_attention_2 fails
+    # Only use 8-bit quantization if explicitly requested (not recommended with LoRA)
+    if args.use_8bit:
+        from transformers import BitsAndBytesConfig
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0,
+        )
+        model_kwargs["quantization_config"] = quantization_config
+        print("⚠️  Using 8-bit quantization (may conflict with LoRA)")
+    
+    # Try to load with flash_attention_2, fall back to sdpa if it fails
     attn_impl = args.attn_implementation
     try:
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name,
-            quantization_config=quantization_config,
-            torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
-            trust_remote_code=True,
-            device_map="auto",
-            attn_implementation=attn_impl,
+            **model_kwargs
         )
     except Exception as e:
         if attn_impl == "flash_attention_2":
-            print(f"⚠️  flash_attention_2 failed with quantization, falling back to sdpa")
-            attn_impl = "sdpa"
+            print(f"⚠️  flash_attention_2 failed, falling back to sdpa: {e}")
+            model_kwargs["attn_implementation"] = "sdpa"
             model = AutoModelForCausalLM.from_pretrained(
                 args.model_name,
-                quantization_config=quantization_config,
-                torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
-                trust_remote_code=True,
-                device_map="auto",
-                attn_implementation=attn_impl,
+                **model_kwargs
             )
         else:
             raise
