@@ -238,7 +238,7 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Qwen/Qwen2.5-3B-Instruct",
+        default="Qwen/Qwen3-4B-Instruct-2507",
         help="Base model to fine-tune",
     )
     parser.add_argument(
@@ -254,7 +254,7 @@ def main():
         help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'sdpa' (PyTorch built-in).",
     )
     
-    # Training arguments (matching paper defaults for 7B, adjusted for 3B)
+    # Training arguments (matching paper defaults for 7B, adjusted for 4B)
     parser.add_argument(
         "--num_train_epochs",
         type=int,
@@ -265,7 +265,7 @@ def main():
         "--per_device_train_batch_size",
         type=int,
         default=8,
-        help="Batch size per device (paper: 8 for 7B/A100 80GB, adjusted for 3B)",
+        help="Batch size per device (paper: 8 for 7B/A100 80GB, adjusted for 4B)",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
