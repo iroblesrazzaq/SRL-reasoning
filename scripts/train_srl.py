@@ -203,11 +203,18 @@ class SRLGRPOTrainer(GRPOTrainer):
         """
         Override training step to log dynamic sampling statistics.
         """
+        # Clear cache before step to maximize available memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         loss = super().training_step(model, inputs, num_items_in_batch)
         
         # Clear CUDA cache after each step to prevent memory buildup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            # Force garbage collection
+            import gc
+            gc.collect()
         
         # Log filtering statistics after each step
         if self._last_filter_stats["total"] > 0:
