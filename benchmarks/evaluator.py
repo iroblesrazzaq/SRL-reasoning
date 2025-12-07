@@ -328,6 +328,35 @@ class MathEvaluator:
             print(f"  Free: {free:.2f} GB")
             print(f"  vLLM will request: {gpu_memory_utilization * total:.2f} GB ({gpu_memory_utilization * 100:.0f}%)")
         
+        # CRITICAL: Modify model config to reduce max_model_len
+        # vLLM reads max_model_len from config.json, so we need to modify it
+        from pathlib import Path
+        import json
+        model_dir = Path(model_path)
+        config_path = model_dir / "config.json"
+        
+        if config_path.exists():
+            # Read and modify config
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            original_max_len = config.get("max_position_embeddings", config.get("model_max_length", None))
+            if original_max_len and original_max_len > 8192:
+                print(f"⚠️  Model config has max_position_embeddings={original_max_len}")
+                print(f"   Temporarily reducing to 8192 for memory efficiency...")
+                # Save original for restoration later
+                config["_original_max_position_embeddings"] = original_max_len
+                config["max_position_embeddings"] = 8192
+                # Also set model_max_length if it exists
+                if "model_max_length" in config:
+                    config["_original_model_max_length"] = config["model_max_length"]
+                    config["model_max_length"] = 8192
+                
+                # Write modified config
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+                print(f"✓ Config modified: max_position_embeddings=8192")
+        
         try:
             print("Initializing vLLM engine (this may take a minute)...")
             # Start with reduced max_model_len to save memory (4B model with default 262144 uses too much)
