@@ -313,6 +313,14 @@ class MathEvaluator:
         # 1. Use base model tokenizer (tokenizer doesn't change during fine-tuning)
         # 2. Update/downgrade transformers or vLLM versions
         # 3. Load tokenizer from base model before vLLM initialization
+        
+        # Clear GPU cache before vLLM initialization
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print(f"GPU memory before vLLM: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB allocated, "
+                  f"{torch.cuda.memory_reserved(0) / 1e9:.2f} GB reserved")
+        
         try:
             self.llm = vllm.LLM(
                 model=model_path,
@@ -320,6 +328,45 @@ class MathEvaluator:
                 trust_remote_code=True,
                 gpu_memory_utilization=gpu_memory_utilization,
             )
+        except RuntimeError as e:
+            # Check if it's the engine initialization error
+            if "Engine core initialization failed" in str(e):
+                # Get GPU memory info for diagnostics
+                gpu_info = ""
+                if torch.cuda.is_available():
+                    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+                    allocated = torch.cuda.memory_allocated(0) / 1e9
+                    reserved = torch.cuda.memory_reserved(0) / 1e9
+                    free = total - reserved
+                    gpu_info = (
+                        f"\nGPU Memory Status:\n"
+                        f"  Total: {total:.2f} GB\n"
+                        f"  Allocated: {allocated:.2f} GB\n"
+                        f"  Reserved: {reserved:.2f} GB\n"
+                        f"  Free: {free:.2f} GB\n"
+                        f"  vLLM requested: {gpu_memory_utilization * 100:.0f}% = {gpu_memory_utilization * total:.2f} GB\n"
+                    )
+                
+                error_msg = (
+                    f"\n{'='*80}\n"
+                    f"ERROR: vLLM engine initialization failed.\n"
+                    f"{gpu_info}"
+                    f"\nThis could be due to:\n"
+                    f"  1. Out of memory (OOM) - vLLM needs more memory than available\n"
+                    f"  2. vLLM version incompatibility\n"
+                    f"  3. Model file corruption or incomplete model\n"
+                    f"  4. CUDA/GPU driver issues\n\n"
+                    f"SOLUTIONS (try in order):\n"
+                    f"  1. Reduce GPU memory usage: Set gpu_memory_utilization=0.6 or 0.5\n"
+                    f"  2. Clear GPU cache: Runtime → Restart runtime\n"
+                    f"  3. Check GPU memory: Runtime → Manage sessions\n"
+                    f"  4. Verify model files are complete in: {model_path}\n"
+                    f"  5. Try updating vLLM: !pip install vllm --upgrade\n"
+                    f"{'='*80}\n"
+                )
+                raise RuntimeError(error_msg) from e
+            # If it's a different RuntimeError, re-raise it
+            raise
         except AttributeError as e:
             if "'dict' object has no attribute 'model_type'" in str(e):
                 # Try one more aggressive fix: clear transformers cache and reload
