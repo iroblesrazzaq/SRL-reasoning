@@ -313,31 +313,174 @@ class MathEvaluator:
         # 1. Use base model tokenizer (tokenizer doesn't change during fine-tuning)
         # 2. Update/downgrade transformers or vLLM versions
         # 3. Load tokenizer from base model before vLLM initialization
+        
+        # Clear GPU cache before vLLM initialization
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            allocated = torch.cuda.memory_allocated(0) / 1e9
+            reserved = torch.cuda.memory_reserved(0) / 1e9
+            total = torch.cuda.get_device_properties(0).total_memory / 1e9
+            free = total - reserved
+            print(f"GPU memory before vLLM:")
+            print(f"  Allocated: {allocated:.2f} GB")
+            print(f"  Reserved: {reserved:.2f} GB")
+            print(f"  Free: {free:.2f} GB")
+            print(f"  vLLM will request: {gpu_memory_utilization * total:.2f} GB ({gpu_memory_utilization * 100:.0f}%)")
+        
+        # CRITICAL: Modify model config to reduce max_model_len
+        # vLLM reads max_model_len from config.json, so we need to modify it
+        from pathlib import Path
+        import json
+        model_dir = Path(model_path)
+        config_path = model_dir / "config.json"
+        
+        if config_path.exists():
+            # Read and modify config
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            original_max_len = config.get("max_position_embeddings", config.get("model_max_length", None))
+            if original_max_len and original_max_len > 8192:
+                print(f"⚠️  Model config has max_position_embeddings={original_max_len}")
+                print(f"   Temporarily reducing to 8192 for memory efficiency...")
+                # Save original for restoration later
+                config["_original_max_position_embeddings"] = original_max_len
+                config["max_position_embeddings"] = 8192
+                # Also set model_max_length if it exists
+                if "model_max_length" in config:
+                    config["_original_model_max_length"] = config["model_max_length"]
+                    config["model_max_length"] = 8192
+                
+                # Write modified config
+                with open(config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+                print(f"✓ Config modified: max_position_embeddings=8192")
+        
         try:
-            self.llm = vllm.LLM(
-                model=model_path,
-                dtype="bfloat16",
-                trust_remote_code=True,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
-        except AttributeError as e:
-            if "'dict' object has no attribute 'model_type'" in str(e):
+            print("Initializing vLLM engine (this may take a minute)...")
+            # Start with reduced max_model_len to save memory (4B model with default 262144 uses too much)
+            # 8192 is still plenty for math problems
+            vllm_kwargs = {
+                "model": model_path,
+                "dtype": "bfloat16",
+                "trust_remote_code": True,
+                "gpu_memory_utilization": gpu_memory_utilization,
+                "tensor_parallel_size": 1,  # Explicitly use single GPU
+                "max_model_len": 8192,  # Reduced from default 262144 to save memory
+            }
+            
+            print(f"  Using max_model_len={vllm_kwargs['max_model_len']} (reduced for memory efficiency)")
+            self.llm = vllm.LLM(**vllm_kwargs)
+            print("✓ vLLM engine initialized successfully!")
+        except RuntimeError as e:
+            # Check if it's the engine initialization error
+            if "Engine core initialization failed" in str(e):
+                # Get GPU memory info for diagnostics
+                gpu_info = ""
+                if torch.cuda.is_available():
+                    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+                    allocated = torch.cuda.memory_allocated(0) / 1e9
+                    reserved = torch.cuda.memory_reserved(0) / 1e9
+                    free = total - reserved
+                    gpu_info = (
+                        f"\nGPU Memory Status:\n"
+                        f"  Total: {total:.2f} GB\n"
+                        f"  Allocated: {allocated:.2f} GB\n"
+                        f"  Reserved: {reserved:.2f} GB\n"
+                        f"  Free: {free:.2f} GB\n"
+                        f"  vLLM requested: {gpu_memory_utilization * 100:.0f}% = {gpu_memory_utilization * total:.2f} GB\n"
+                    )
+                
                 error_msg = (
                     f"\n{'='*80}\n"
-                    f"ERROR: Tokenizer loading failed due to transformers/vLLM compatibility issue.\n"
-                    f"This is a known issue where transformers loads config as dict instead of config object.\n\n"
-                    f"WORKAROUNDS:\n"
-                    f"1. Load tokenizer from base model before benchmarking:\n"
-                    f"   from transformers import AutoTokenizer\n"
-                    f"   tokenizer = AutoTokenizer.from_pretrained('{base_model if base_model else 'BASE_MODEL_ID'}')\n"
-                    f"   tokenizer.save_pretrained('{model_path}')\n\n"
-                    f"2. Update/downgrade versions:\n"
-                    f"   !pip install transformers==4.40.0  # or compatible version\n"
-                    f"   !pip install vllm==0.4.0  # or compatible version\n\n"
-                    f"3. Use HuggingFace model ID instead of local path if available.\n"
+                    f"ERROR: vLLM engine initialization failed.\n"
+                    f"{gpu_info}"
+                    f"\nThis could be due to:\n"
+                    f"  1. Out of memory (OOM) - vLLM needs more memory than available\n"
+                    f"  2. vLLM version incompatibility\n"
+                    f"  3. Model file corruption or incomplete model\n"
+                    f"  4. CUDA/GPU driver issues\n\n"
+                    f"SOLUTIONS (try in order):\n"
+                    f"  1. Reduce GPU memory usage: Set gpu_memory_utilization=0.6 or 0.5\n"
+                    f"  2. Clear GPU cache: Runtime → Restart runtime\n"
+                    f"  3. Check GPU memory: Runtime → Manage sessions\n"
+                    f"  4. Verify model files are complete in: {model_path}\n"
+                    f"  5. Try updating vLLM: !pip install vllm --upgrade\n"
                     f"{'='*80}\n"
                 )
                 raise RuntimeError(error_msg) from e
+            # If it's a different RuntimeError, re-raise it
+            raise
+        except AttributeError as e:
+            if "'dict' object has no attribute 'model_type'" in str(e):
+                # Try one more aggressive fix: clear transformers cache and reload
+                if base_model:
+                    print(f"\n⚠️  vLLM initialization failed. Attempting aggressive fix...")
+                    import sys
+                    import importlib
+                    
+                    # Clear transformers cache
+                    modules_to_clear = [
+                        'transformers.models.auto.configuration_auto',
+                        'transformers.models.auto.tokenization_auto',
+                        'transformers.configuration_utils',
+                        'transformers.tokenization_utils_base',
+                    ]
+                    for mod in modules_to_clear:
+                        if mod in sys.modules:
+                            del sys.modules[mod]
+                    
+                    # Force reload tokenizer/config one more time
+                    from transformers import AutoTokenizer, AutoConfig
+                    print(f"Force-reloading tokenizer/config from {base_model}...")
+                    base_tokenizer = AutoTokenizer.from_pretrained(
+                        base_model, 
+                        trust_remote_code=True,
+                        local_files_only=False
+                    )
+                    base_config = AutoConfig.from_pretrained(
+                        base_model, 
+                        trust_remote_code=True,
+                        local_files_only=False
+                    )
+                    base_tokenizer.save_pretrained(model_path)
+                    base_config.save_pretrained(model_path)
+                    print("✓ Tokenizer/config force-reloaded")
+                    
+                    # Try vLLM again
+                    try:
+                        self.llm = vllm.LLM(
+                            model=model_path,
+                            dtype="bfloat16",
+                            trust_remote_code=True,
+                            gpu_memory_utilization=gpu_memory_utilization,
+                        )
+                        print("✓ vLLM initialized successfully after fix!")
+                    except Exception as e2:
+                        error_msg = (
+                            f"\n{'='*80}\n"
+                            f"ERROR: Tokenizer loading failed due to transformers/vLLM compatibility issue.\n"
+                            f"This is a known issue where transformers loads config as dict instead of config object.\n\n"
+                            f"SOLUTION: Update transformers version:\n"
+                            f"  !pip install transformers>=4.40.0 --upgrade\n"
+                            f"  Then RESTART RUNTIME and try again.\n\n"
+                            f"Alternative: Use HuggingFace model ID instead of local path if available.\n"
+                            f"{'='*80}\n"
+                        )
+                        raise RuntimeError(error_msg) from e2
+                else:
+                    error_msg = (
+                        f"\n{'='*80}\n"
+                        f"ERROR: Tokenizer loading failed due to transformers/vLLM compatibility issue.\n"
+                        f"This is a known issue where transformers loads config as dict instead of config object.\n\n"
+                        f"SOLUTION: Update transformers version:\n"
+                        f"  !pip install transformers>=4.40.0 --upgrade\n"
+                        f"  Then RESTART RUNTIME and try again.\n\n"
+                        f"Alternative: Use HuggingFace model ID instead of local path if available.\n"
+                        f"{'='*80}\n"
+                    )
+                    raise RuntimeError(error_msg) from e
             raise
     
     def _get_prompt_template(self) -> str:
