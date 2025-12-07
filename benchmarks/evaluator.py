@@ -390,8 +390,29 @@ class MathEvaluator:
             }
             
             print(f"  Using max_model_len={vllm_kwargs['max_model_len']} (reduced for memory efficiency)")
-            self.llm = vllm.LLM(**vllm_kwargs)
-            print("✓ vLLM engine initialized successfully!")
+            print(f"  Model path: {model_path}")
+            print(f"  GPU memory utilization: {gpu_memory_utilization}")
+            
+            # Try to capture stderr from vLLM initialization
+            import sys
+            import io
+            old_stderr = sys.stderr
+            stderr_capture = io.StringIO()
+            try:
+                sys.stderr = stderr_capture
+                self.llm = vllm.LLM(**vllm_kwargs)
+                sys.stderr = old_stderr
+                print("✓ vLLM engine initialized successfully!")
+            except Exception as e:
+                sys.stderr = old_stderr
+                stderr_output = stderr_capture.getvalue()
+                if stderr_output:
+                    print("\n" + "=" * 80)
+                    print("CAPTURED STDERR FROM vLLM:")
+                    print("=" * 80)
+                    print(stderr_output)
+                    print("=" * 80)
+                raise
         except RuntimeError as e:
             # Check if it's the engine initialization error
             if "Engine core initialization failed" in str(e):
