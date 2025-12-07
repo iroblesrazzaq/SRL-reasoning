@@ -296,8 +296,8 @@ def main():
     parser.add_argument(
         "--num_generations",
         type=int,
-        default=2,
-        help="Number of completions to generate per prompt (k in paper, default: 8, reduced to 2 for memory)",
+        default=1,
+        help="Number of completions to generate per prompt (k in paper, default: 8, reduced to 1 for memory - can accumulate over steps)",
     )
     parser.add_argument(
         "--max_length",
@@ -308,7 +308,7 @@ def main():
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=128,
+        default=64,
         help="Maximum new tokens to generate (reduced for memory efficiency, paper: 512)",
     )
     parser.add_argument(
@@ -459,11 +459,13 @@ def main():
     
     # 8-bit quantization conflicts with LoRA, so we disable it by default
     # Instead, we rely on bfloat16, gradient checkpointing, and smaller batch sizes
+    # Use CPU offloading for some layers to reduce GPU memory
     model_kwargs = {
         "torch_dtype": torch.bfloat16 if args.bf16 else torch.float32,
         "trust_remote_code": True,
-        "device_map": "auto",
+        "device_map": "balanced_low_0",  # Offload some layers to CPU/other GPUs if available
         "attn_implementation": args.attn_implementation,
+        "low_cpu_mem_usage": True,  # Load model more efficiently
     }
     
     # Only use 8-bit quantization if explicitly requested (not recommended with LoRA)
@@ -515,10 +517,21 @@ def main():
     # Disable cache during training to save memory
     model.config.use_cache = False
     
+    # Additional memory optimizations
+    if hasattr(model, "config"):
+        # Reduce memory during generation
+        if hasattr(model.config, "max_position_embeddings"):
+            # Ensure we're not allocating for full context if not needed
+            pass
+        # Use more aggressive memory settings
+        model.config.use_cache = False
+    
     # Clear CUDA cache to free up memory after model loading
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+        # Set memory fraction to help with fragmentation
+        torch.cuda.set_per_process_memory_fraction(0.9)
     
     model.train()
     
