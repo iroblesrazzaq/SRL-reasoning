@@ -23,6 +23,10 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 import torch
+
+# Enable expandable segments to reduce CUDA memory fragmentation
+# This helps when you have enough total memory but allocation fails due to fragmentation
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, TaskType, get_peft_model
@@ -264,14 +268,14 @@ def main():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=8,
-        help="Batch size per device (paper: 8 for 7B/A100 80GB, adjusted for 4B)",
+        default=2,
+        help="Batch size per device (reduced for memory efficiency, paper: 8 for 7B/A100 80GB)",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=64,
-        help="Gradient accumulation steps (paper: 64 for 7B, total batch size = 8 * 64 = 512)",
+        default=256,
+        help="Gradient accumulation steps (increased to maintain total batch size = 2 * 256 = 512)",
     )
     parser.add_argument(
         "--learning_rate",
@@ -282,20 +286,20 @@ def main():
     parser.add_argument(
         "--num_generations",
         type=int,
-        default=8,
-        help="Number of completions to generate per prompt (k in paper, default: 8)",
+        default=4,
+        help="Number of completions to generate per prompt (k in paper, default: 8, reduced to 4 for memory)",
     )
     parser.add_argument(
         "--max_length",
         type=int,
-        default=2048,
-        help="Maximum sequence length",
+        default=1024,
+        help="Maximum sequence length (reduced for memory efficiency, paper: 2048)",
     )
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=512,
-        help="Maximum new tokens to generate",
+        default=256,
+        help="Maximum new tokens to generate (reduced for memory efficiency, paper: 512)",
     )
     parser.add_argument(
         "--max_grad_norm",
@@ -442,13 +446,40 @@ def main():
     
     # Load model
     print(f"Loading model: {args.model_name}")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
-        trust_remote_code=True,
-        device_map="auto",
-        attn_implementation=args.attn_implementation,
+    # Use BitsAndBytesConfig for 8-bit quantization to reduce memory
+    from transformers import BitsAndBytesConfig
+    
+    quantization_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_threshold=6.0,
     )
+    
+    # Note: 8-bit quantization may not work with flash_attention_2
+    # If using quantization, fall back to sdpa if flash_attention_2 fails
+    attn_impl = args.attn_implementation
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            quantization_config=quantization_config,
+            torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
+            trust_remote_code=True,
+            device_map="auto",
+            attn_implementation=attn_impl,
+        )
+    except Exception as e:
+        if attn_impl == "flash_attention_2":
+            print(f"⚠️  flash_attention_2 failed with quantization, falling back to sdpa")
+            attn_impl = "sdpa"
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name,
+                quantization_config=quantization_config,
+                torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
+                trust_remote_code=True,
+                device_map="auto",
+                attn_implementation=attn_impl,
+            )
+        else:
+            raise
     
     # Apply LoRA
     print("Applying LoRA...")
