@@ -250,8 +250,8 @@ def main():
     parser.add_argument(
         "--attn_implementation",
         type=str,
-        default="sdpa",
-        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'sdpa' (PyTorch built-in).",
+        default="flash_attention_2",
+        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'flash_attention_2' for optimal performance.",
     )
     
     # Training arguments (matching paper defaults for 7B, adjusted for 4B)
@@ -464,6 +464,13 @@ def main():
     
     # Enable input gradients (required for training)
     model.enable_input_require_grads()
+    
+    # Enable gradient checkpointing for memory efficiency
+    model.gradient_checkpointing_enable()
+    
+    # Disable cache during training to save memory
+    model.config.use_cache = False
+    
     model.train()
     
     # Verify setup
