@@ -27,7 +27,8 @@ if not os.path.exists(WORKDIR):
 !git pull  # Get latest changes
 
 # Install dependencies (combined, skip pip upgrade to save time)
-!pip install -q bitsandbytes accelerate peft transformers trl datasets flash-attn --no-build-isolation
+# Note: Using sdpa (PyTorch built-in) instead of flash-attn for better compatibility
+!pip install -q bitsandbytes accelerate peft transformers trl datasets --no-build-isolation
 
 # Install package
 !pip install -e . -q
