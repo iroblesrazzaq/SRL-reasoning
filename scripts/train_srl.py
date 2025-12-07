@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-SRL Training Script using TRL's GRPOTrainer with Unsloth optimization.
+SRL Training Script using TRL's GRPOTrainer with vLLM optimization.
 
 This script implements Step-wise Reinforcement Learning (SRL) using
 Group Relative Policy Optimization (GRPO) from the TRL library.
 
-Uses Unsloth for 2-4x faster training with 50-80% less memory!
+Uses vLLM for 6-10x faster generation (the 90%+ bottleneck in GRPO training).
+Falls back to standard transformers if vLLM is unavailable.
 
 Matches paper settings (2510.25992v1):
 - Default: 3 epochs training (~123 steps, 1/10th of paper's 30 epochs)
 - Epoch-based checkpoint saving
 - Best model selection based on eval_reward
-- Batch size 512 (via gradient accumulation)
+- Batch size 128 (via gradient accumulation)
 
 Usage:
     python scripts/train_srl.py --data_path data/srl_steps.jsonl --output_dir outputs/srl_model
@@ -33,16 +34,18 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from datasets import Dataset
 
-# Try to import Unsloth - fall back to standard transformers if not available
+# Use standard transformers + PEFT (vLLM handles generation speedup)
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, TaskType, get_peft_model
+
+# Check vLLM availability
 try:
-    from unsloth import FastLanguageModel
-    UNSLOTH_AVAILABLE = True
-    print("✓ Unsloth available - using optimized training")
+    import vllm
+    VLLM_AVAILABLE = True
+    print("✓ vLLM available - using optimized generation")
 except ImportError:
-    UNSLOTH_AVAILABLE = False
-    print("⚠️  Unsloth not available - falling back to standard transformers")
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from peft import LoraConfig, TaskType, get_peft_model
+    VLLM_AVAILABLE = False
+    print("⚠️  vLLM not available - falling back to HuggingFace generation")
 
 # Try to import GRPO - may require TRL from git
 try:
@@ -240,60 +243,11 @@ class SRLGRPOTrainer(GRPOTrainer):
         return loss
 
 
-def load_model_unsloth(model_name: str, max_seq_length: int, use_4bit: bool, seed: int):
+def load_model(model_name: str, bf16: bool, attn_implementation: str, use_8bit: bool):
     """
-    Load model using Unsloth for optimized training.
+    Load model using standard transformers + PEFT.
     
-    Args:
-        model_name: HuggingFace model name or path
-        max_seq_length: Maximum sequence length
-        use_4bit: Whether to use 4-bit quantization
-        seed: Random seed for LoRA initialization
-        
-    Returns:
-        Tuple of (model, tokenizer)
-    """
-    print(f"Loading model with Unsloth: {model_name}")
-    
-    # Clear memory before loading
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
-        max_seq_length=max_seq_length,
-        dtype=torch.bfloat16,
-        load_in_4bit=use_4bit,
-        trust_remote_code=True,
-    )
-    
-    # Apply LoRA with Unsloth's optimized implementation
-    model = FastLanguageModel.get_peft_model(
-        model,
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
-        bias="none",
-        use_gradient_checkpointing="unsloth",  # Unsloth's optimized checkpointing
-        random_state=seed,
-    )
-    
-    # Set padding
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
-    
-    return model, tokenizer
-
-
-def load_model_standard(model_name: str, bf16: bool, attn_implementation: str, use_8bit: bool):
-    """
-    Load model using standard transformers/PEFT (fallback when Unsloth unavailable).
+    vLLM will handle fast generation during GRPO training.
     
     Args:
         model_name: HuggingFace model name or path
@@ -306,7 +260,7 @@ def load_model_standard(model_name: str, bf16: bool, attn_implementation: str, u
     """
     from transformers import BitsAndBytesConfig
     
-    print(f"Loading model with standard transformers: {model_name}")
+    print(f"Loading model with transformers + PEFT: {model_name}")
     
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
@@ -354,7 +308,7 @@ def load_model_standard(model_name: str, bf16: bool, attn_implementation: str, u
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train SRL model using GRPO with Unsloth optimization",
+        description="Train SRL model using GRPO with vLLM optimization",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     
@@ -420,14 +374,14 @@ def main():
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=1,
-        help="Batch size per device (paper: 8 for 7B/A100 80GB, reduced for memory)",
+        default=4,
+        help="Batch size per device (increased with vLLM efficiency)",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=512,
-        help="Gradient accumulation steps (increased to maintain total batch size = 1 * 512 = 512)",
+        default=32,
+        help="Gradient accumulation steps (effective batch size = 4 * 32 = 128)",
     )
     parser.add_argument(
         "--learning_rate",
@@ -438,8 +392,28 @@ def main():
     parser.add_argument(
         "--num_generations",
         type=int,
-        default=2,
-        help="Number of completions to generate per prompt (k in paper, default: 2 for memory, paper: 8)",
+        default=4,
+        help="Number of completions to generate per prompt (k in paper, default: 4, paper: 8)",
+    )
+    
+    # vLLM arguments
+    parser.add_argument(
+        "--use_vllm",
+        action="store_true",
+        default=True,
+        help="Use vLLM for fast generation (6-10x speedup). Disable with --no-use_vllm",
+    )
+    parser.add_argument(
+        "--no-use_vllm",
+        action="store_false",
+        dest="use_vllm",
+        help="Disable vLLM and use HuggingFace generation",
+    )
+    parser.add_argument(
+        "--vllm_gpu_memory_utilization",
+        type=float,
+        default=0.5,
+        help="GPU memory fraction for vLLM (0.5 = 50%%, leaves room for training model)",
     )
     parser.add_argument(
         "--max_prompt_length",
@@ -572,14 +546,16 @@ def main():
     
     args = parser.parse_args()
     
-    # Handle 4-bit flag
-    use_4bit = args.use_4bit
-    
     # Set random seed
     torch.manual_seed(args.seed)
     
+    # Determine if vLLM will be used
+    use_vllm = args.use_vllm and VLLM_AVAILABLE
+    if args.use_vllm and not VLLM_AVAILABLE:
+        print("⚠️  vLLM requested but not available, falling back to HF generation")
+    
     print("=" * 80)
-    print("SRL TRAINING WITH GRPO" + (" (Unsloth)" if UNSLOTH_AVAILABLE else " (Standard)"))
+    print("SRL TRAINING WITH GRPO" + (" (vLLM)" if use_vllm else " (HuggingFace)"))
     print("=" * 80)
     print(f"Model: {args.model_name}")
     print(f"Output: {args.output_dir}")
@@ -587,24 +563,18 @@ def main():
     print(f"Batch size: {args.per_device_train_batch_size} * {args.gradient_accumulation_steps} = {args.per_device_train_batch_size * args.gradient_accumulation_steps}")
     print(f"Learning rate: {args.learning_rate}")
     print(f"Num generations (k): {args.num_generations}")
-    print(f"4-bit quantization: {use_4bit}")
+    print(f"use_vllm: {use_vllm}")
+    if use_vllm:
+        print(f"vllm_gpu_memory_utilization: {args.vllm_gpu_memory_utilization}")
     print("=" * 80)
     
     # Load model and tokenizer
-    if UNSLOTH_AVAILABLE:
-        model, tokenizer = load_model_unsloth(
-            model_name=args.model_name,
-            max_seq_length=args.max_seq_length,
-            use_4bit=use_4bit,
-            seed=args.seed,
-        )
-    else:
-        model, tokenizer = load_model_standard(
-            model_name=args.model_name,
-            bf16=args.bf16,
-            attn_implementation=args.attn_implementation,
-            use_8bit=args.use_8bit,
-        )
+    model, tokenizer = load_model(
+        model_name=args.model_name,
+        bf16=args.bf16,
+        attn_implementation=args.attn_implementation,
+        use_8bit=args.use_8bit,
+    )
     
     # Verify setup
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -663,10 +633,13 @@ def main():
         "warmup_ratio": args.warmup_ratio,
         "beta": args.beta,
         "temperature": args.temperature,
-        # CRITICAL: Disable vLLM to prevent CUDA OOM from dual memory allocation
-        # vLLM pre-allocates ~90% of GPU memory by default, conflicting with PyTorch/Unsloth
-        "use_vllm": False,
+        # vLLM settings for fast generation
+        "use_vllm": use_vllm,
     }
+    
+    # Add vLLM memory utilization if using vLLM
+    if use_vllm and "vllm_gpu_memory_utilization" in supported_params:
+        grpo_config_dict["vllm_gpu_memory_utilization"] = args.vllm_gpu_memory_utilization
     
     # Add token length limits if supported
     if "max_prompt_length" in supported_params:
@@ -706,7 +679,9 @@ def main():
     print(f"  num_generations: {args.num_generations}")
     print(f"  max_prompt_length: {args.max_prompt_length}")
     print(f"  max_completion_length: {args.max_completion_length}")
-    print(f"  use_vllm: False (using PyTorch generation)")
+    print(f"  use_vllm: {use_vllm}")
+    if use_vllm:
+        print(f"  vllm_gpu_memory_utilization: {args.vllm_gpu_memory_utilization}")
     print(f"  save_strategy: {args.save_strategy}")
     if args.save_strategy == "steps":
         print(f"  save_steps: {args.save_steps}")
@@ -722,10 +697,6 @@ def main():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    
-    # Switch to inference mode for generation (Unsloth-specific)
-    if UNSLOTH_AVAILABLE:
-        FastLanguageModel.for_inference(model)
     
     # Initialize trainer
     filter_epsilon = args.filter_epsilon if args.filter_epsilon is not None else None
@@ -751,10 +722,8 @@ def main():
     print("=" * 80)
     if torch.cuda.is_available():
         print(f"GPU Memory before training: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
-    
-    # Switch to training mode (Unsloth-specific)
-    if UNSLOTH_AVAILABLE:
-        FastLanguageModel.for_training(model)
+    if use_vllm:
+        print("vLLM will handle fast generation (6-10x speedup)")
     
     trainer.train()
     
