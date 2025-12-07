@@ -6,7 +6,7 @@ This script implements Step-wise Reinforcement Learning (SRL) using
 Group Relative Policy Optimization (GRPO) from the TRL library.
 
 Matches paper settings (2510.25992v1):
-- 30 epochs training
+- Default: 3 epochs training (~123 steps, 1/10th of paper's 30 epochs)
 - Epoch-based checkpoint saving
 - Best model selection based on eval_reward
 - Batch size 512 (via gradient accumulation)
@@ -238,7 +238,7 @@ def main():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Qwen/Qwen2.5-0.5B-Instruct",
+        default="Qwen/Qwen2.5-4B-Instruct",
         help="Base model to fine-tune",
     )
     parser.add_argument(
@@ -254,24 +254,24 @@ def main():
         help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'sdpa' (PyTorch built-in).",
     )
     
-    # Training arguments (matching paper defaults for 7B, adjusted for 0.5B)
+    # Training arguments (matching paper defaults for 7B, adjusted for 4B)
     parser.add_argument(
         "--num_train_epochs",
         type=int,
-        default=30,
-        help="Number of training epochs (paper: 30)",
+        default=3,
+        help="Number of training epochs (paper: 30, reduced to 3 for faster training ~123 steps)",
     )
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=16,
-        help="Batch size per device (paper: 8 for 7B/A100 80GB, increased to 16 for 0.5B)",
+        default=8,
+        help="Batch size per device (paper: 8 for 7B/A100 80GB, adjusted for 4B)",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=32,
-        help="Gradient accumulation steps (paper: 64 for 7B, reduced to 32 for 0.5B, total batch size = 16 * 32 = 512)",
+        default=64,
+        help="Gradient accumulation steps (paper: 64 for 7B, total batch size = 8 * 64 = 512)",
     )
     parser.add_argument(
         "--learning_rate",
