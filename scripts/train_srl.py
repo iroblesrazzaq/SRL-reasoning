@@ -254,8 +254,8 @@ def main():
     parser.add_argument(
         "--attn_implementation",
         type=str,
-        default="flash_attention_2",
-        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'flash_attention_2' for optimal performance.",
+        default="sdpa",
+        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'sdpa' (flash_attn2 uses more memory during generation)",
     )
     parser.add_argument(
         "--use_8bit",
@@ -292,19 +292,19 @@ def main():
     parser.add_argument(
         "--num_generations",
         type=int,
-        default=4,
-        help="Number of completions to generate per prompt (k in paper, default: 8, reduced to 4 for memory)",
+        default=2,
+        help="Number of completions to generate per prompt (k in paper, default: 8, reduced to 2 for memory)",
     )
     parser.add_argument(
         "--max_length",
         type=int,
-        default=1024,
+        default=512,
         help="Maximum sequence length (reduced for memory efficiency, paper: 2048)",
     )
     parser.add_argument(
         "--max_new_tokens",
         type=int,
-        default=256,
+        default=128,
         help="Maximum new tokens to generate (reduced for memory efficiency, paper: 512)",
     )
     parser.add_argument(
