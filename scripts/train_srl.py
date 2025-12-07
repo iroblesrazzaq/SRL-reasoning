@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-SRL Training Script using TRL's GRPOTrainer.
+SRL Training Script using TRL's GRPOTrainer with Unsloth optimization.
 
 This script implements Step-wise Reinforcement Learning (SRL) using
 Group Relative Policy Optimization (GRPO) from the TRL library.
+
+Uses Unsloth for 2-4x faster training with 50-80% less memory!
 
 Matches paper settings (2510.25992v1):
 - Default: 3 epochs training (~123 steps, 1/10th of paper's 30 epochs)
@@ -16,6 +18,7 @@ Usage:
 """
 
 import argparse
+import gc
 import inspect
 import json
 import os
@@ -27,9 +30,19 @@ import torch
 # Enable expandable segments to reduce CUDA memory fragmentation
 # This helps when you have enough total memory but allocation fails due to fragmentation
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 from datasets import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from peft import LoraConfig, TaskType, get_peft_model
+
+# Try to import Unsloth - fall back to standard transformers if not available
+try:
+    from unsloth import FastLanguageModel
+    UNSLOTH_AVAILABLE = True
+    print("✓ Unsloth available - using optimized training")
+except ImportError:
+    UNSLOTH_AVAILABLE = False
+    print("⚠️  Unsloth not available - falling back to standard transformers")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import LoraConfig, TaskType, get_peft_model
 
 # Try to import GRPO - may require TRL from git
 try:
@@ -182,7 +195,7 @@ class SRLGRPOTrainer(GRPOTrainer):
         
         # Log warning if too many samples are filtered
         if kept == 0 and total > 0:
-            print(f"⚠️  WARNING: All {total} samples filtered out (zero reward variance). "
+            print(f"WARNING: All {total} samples filtered out (zero reward variance). "
                   f"Consider disabling filter (set --filter_epsilon to None or >= 1.0) "
                   f"or check if model is generating proper format.")
         
@@ -212,8 +225,6 @@ class SRLGRPOTrainer(GRPOTrainer):
         # Clear CUDA cache after each step to prevent memory buildup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            # Force garbage collection
-            import gc
             gc.collect()
         
         # Log filtering statistics after each step
@@ -229,9 +240,121 @@ class SRLGRPOTrainer(GRPOTrainer):
         return loss
 
 
+def load_model_unsloth(model_name: str, max_seq_length: int, use_4bit: bool, seed: int):
+    """
+    Load model using Unsloth for optimized training.
+    
+    Args:
+        model_name: HuggingFace model name or path
+        max_seq_length: Maximum sequence length
+        use_4bit: Whether to use 4-bit quantization
+        seed: Random seed for LoRA initialization
+        
+    Returns:
+        Tuple of (model, tokenizer)
+    """
+    print(f"Loading model with Unsloth: {model_name}")
+    
+    # Clear memory before loading
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_name,
+        max_seq_length=max_seq_length,
+        dtype=torch.bfloat16,
+        load_in_4bit=use_4bit,
+        trust_remote_code=True,
+    )
+    
+    # Apply LoRA with Unsloth's optimized implementation
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules=[
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+        ],
+        bias="none",
+        use_gradient_checkpointing="unsloth",  # Unsloth's optimized checkpointing
+        random_state=seed,
+    )
+    
+    # Set padding
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    
+    return model, tokenizer
+
+
+def load_model_standard(model_name: str, bf16: bool, attn_implementation: str, use_8bit: bool):
+    """
+    Load model using standard transformers/PEFT (fallback when Unsloth unavailable).
+    
+    Args:
+        model_name: HuggingFace model name or path
+        bf16: Whether to use bfloat16
+        attn_implementation: Attention implementation to use
+        use_8bit: Whether to use 8-bit quantization
+        
+    Returns:
+        Tuple of (model, tokenizer)
+    """
+    from transformers import BitsAndBytesConfig
+    
+    print(f"Loading model with standard transformers: {model_name}")
+    
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        padding_side="left",
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    model_kwargs = {
+        "torch_dtype": torch.bfloat16 if bf16 else torch.float32,
+        "trust_remote_code": True,
+        "device_map": "auto",
+        "attn_implementation": attn_implementation,
+        "low_cpu_mem_usage": True,
+    }
+    
+    if use_8bit:
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_threshold=6.0,
+        )
+        model_kwargs["quantization_config"] = quantization_config
+        print("Using 8-bit quantization (may conflict with LoRA)")
+    
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    
+    # Apply LoRA
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules="all-linear",
+        task_type=TaskType.CAUSAL_LM,
+        bias="none",
+    )
+    model = get_peft_model(model, lora_config)
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+    model.config.use_cache = False
+    model.train()
+    
+    return model, tokenizer
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Train SRL model using GRPO (matches paper 2510.25992v1 settings)",
+        description="Train SRL model using GRPO with Unsloth optimization",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     
@@ -266,13 +389,25 @@ def main():
         "--attn_implementation",
         type=str,
         default="sdpa",
-        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'sdpa' (flash_attn2 uses more memory during generation)",
+        help="Attention backend for non-Unsloth mode (e.g., flash_attention_2, sdpa, eager)",
+    )
+    parser.add_argument(
+        "--use_4bit",
+        action="store_true",
+        default=False,
+        help="Use 4-bit quantization (optional, not needed for A100 80GB)",
     )
     parser.add_argument(
         "--use_8bit",
         action="store_true",
         default=False,
-        help="Use 8-bit quantization (may conflict with LoRA, disabled by default)",
+        help="Use 8-bit quantization (fallback mode only, may conflict with LoRA)",
+    )
+    parser.add_argument(
+        "--max_seq_length",
+        type=int,
+        default=1024,
+        help="Maximum sequence length for Unsloth model (prompt + completion)",
     )
     
     # Training arguments (matching paper defaults for 7B, adjusted for 4B)
@@ -286,7 +421,7 @@ def main():
         "--per_device_train_batch_size",
         type=int,
         default=1,
-        help="Batch size per device (reduced for memory efficiency, paper: 8 for 7B/A100 80GB)",
+        help="Batch size per device (paper: 8 for 7B/A100 80GB, reduced for memory)",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
@@ -304,19 +439,19 @@ def main():
         "--num_generations",
         type=int,
         default=2,
-        help="Number of completions to generate per prompt (k in paper, default: 8, minimum: 2 for GRPO variance calculation)",
+        help="Number of completions to generate per prompt (k in paper, default: 2 for memory, paper: 8)",
     )
     parser.add_argument(
-        "--max_length",
+        "--max_prompt_length",
         type=int,
         default=512,
-        help="Maximum sequence length (reduced for memory efficiency, paper: 2048)",
+        help="Maximum prompt length (paper: 2048, reduced for memory)",
     )
     parser.add_argument(
-        "--max_new_tokens",
+        "--max_completion_length",
         type=int,
-        default=64,
-        help="Maximum new tokens to generate (reduced for memory efficiency, paper: 512)",
+        default=256,
+        help="Maximum completion length (paper: 512, reduced for memory)",
     )
     parser.add_argument(
         "--max_grad_norm",
@@ -437,11 +572,14 @@ def main():
     
     args = parser.parse_args()
     
+    # Handle 4-bit flag
+    use_4bit = args.use_4bit
+    
     # Set random seed
     torch.manual_seed(args.seed)
     
     print("=" * 80)
-    print("SRL TRAINING WITH GRPO")
+    print("SRL TRAINING WITH GRPO" + (" (Unsloth)" if UNSLOTH_AVAILABLE else " (Standard)"))
     print("=" * 80)
     print(f"Model: {args.model_name}")
     print(f"Output: {args.output_dir}")
@@ -449,103 +587,29 @@ def main():
     print(f"Batch size: {args.per_device_train_batch_size} * {args.gradient_accumulation_steps} = {args.per_device_train_batch_size * args.gradient_accumulation_steps}")
     print(f"Learning rate: {args.learning_rate}")
     print(f"Num generations (k): {args.num_generations}")
+    print(f"4-bit quantization: {use_4bit}")
     print("=" * 80)
     
-    # Load tokenizer
-    print(f"\nLoading tokenizer: {args.model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name,
-        trust_remote_code=True,
-        padding_side="left",  # Left padding for generation
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    # Load model
-    print(f"Loading model: {args.model_name}")
-    
-    # 8-bit quantization conflicts with LoRA, so we disable it by default
-    # Instead, we rely on bfloat16, gradient checkpointing, and smaller batch sizes
-    # Use CPU offloading for some layers to reduce GPU memory
-    model_kwargs = {
-        "torch_dtype": torch.bfloat16 if args.bf16 else torch.float32,
-        "trust_remote_code": True,
-        "device_map": "balanced_low_0",  # Offload some layers to CPU/other GPUs if available
-        "attn_implementation": args.attn_implementation,
-        "low_cpu_mem_usage": True,  # Load model more efficiently
-    }
-    
-    # Only use 8-bit quantization if explicitly requested (not recommended with LoRA)
-    if args.use_8bit:
-        from transformers import BitsAndBytesConfig
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-            llm_int8_threshold=6.0,
+    # Load model and tokenizer
+    if UNSLOTH_AVAILABLE:
+        model, tokenizer = load_model_unsloth(
+            model_name=args.model_name,
+            max_seq_length=args.max_seq_length,
+            use_4bit=use_4bit,
+            seed=args.seed,
         )
-        model_kwargs["quantization_config"] = quantization_config
-        print("⚠️  Using 8-bit quantization (may conflict with LoRA)")
-    
-    # Try to load with flash_attention_2, fall back to sdpa if it fails
-    attn_impl = args.attn_implementation
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name,
-            **model_kwargs
+    else:
+        model, tokenizer = load_model_standard(
+            model_name=args.model_name,
+            bf16=args.bf16,
+            attn_implementation=args.attn_implementation,
+            use_8bit=args.use_8bit,
         )
-    except Exception as e:
-        if attn_impl == "flash_attention_2":
-            print(f"⚠️  flash_attention_2 failed, falling back to sdpa: {e}")
-            model_kwargs["attn_implementation"] = "sdpa"
-            model = AutoModelForCausalLM.from_pretrained(
-                args.model_name,
-                **model_kwargs
-            )
-        else:
-            raise
-    
-    # Apply LoRA
-    print("Applying LoRA...")
-    lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        target_modules="all-linear",
-        task_type=TaskType.CAUSAL_LM,
-        bias="none",
-    )
-    model = get_peft_model(model, lora_config)
-    
-    # Enable input gradients (required for training)
-    model.enable_input_require_grads()
-    
-    # Enable gradient checkpointing for memory efficiency
-    model.gradient_checkpointing_enable()
-    
-    # Disable cache during training to save memory
-    model.config.use_cache = False
-    
-    # Additional memory optimizations
-    if hasattr(model, "config"):
-        # Reduce memory during generation
-        if hasattr(model.config, "max_position_embeddings"):
-            # Ensure we're not allocating for full context if not needed
-            pass
-        # Use more aggressive memory settings
-        model.config.use_cache = False
-    
-    # Clear CUDA cache to free up memory after model loading
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        # Set memory fraction to help with fragmentation
-        torch.cuda.set_per_process_memory_fraction(0.9)
-    
-    model.train()
     
     # Verify setup
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"\n✓ Model setup:")
+    print(f"\n Model setup:")
     print(f"  Trainable params: {trainable_params / 1e6:.2f}M ({100 * trainable_params / total_params:.2f}%)")
     print(f"  Total params: {total_params / 1e6:.2f}M")
     
@@ -564,7 +628,7 @@ def main():
         val_dataset = load_srl_dataset(args.val_data_path)
         print(f"  Loaded {len(val_dataset)} validation examples")
     elif args.val_data_path:
-        print(f"⚠️  Warning: Validation data path '{args.val_data_path}' not found. Disabling evaluation.")
+        print(f"Warning: Validation data path '{args.val_data_path}' not found. Disabling evaluation.")
         args.evaluation_strategy = "no"
         args.load_best_model_at_end = False
     else:
@@ -576,6 +640,10 @@ def main():
     reward_fn = create_reward_function(tokenizer)
     
     # Configure GRPO training
+    # Check which parameter names are supported
+    sig = inspect.signature(GRPOConfig.__init__)
+    supported_params = set(sig.parameters.keys())
+    
     # Build config dict with paper-matching defaults
     grpo_config_dict = {
         "output_dir": args.output_dir,
@@ -595,7 +663,16 @@ def main():
         "warmup_ratio": args.warmup_ratio,
         "beta": args.beta,
         "temperature": args.temperature,
+        # CRITICAL: Disable vLLM to prevent CUDA OOM from dual memory allocation
+        # vLLM pre-allocates ~90% of GPU memory by default, conflicting with PyTorch/Unsloth
+        "use_vllm": False,
     }
+    
+    # Add token length limits if supported
+    if "max_prompt_length" in supported_params:
+        grpo_config_dict["max_prompt_length"] = args.max_prompt_length
+    if "max_completion_length" in supported_params:
+        grpo_config_dict["max_completion_length"] = args.max_completion_length
     
     # Add save_steps if using step-based saving
     if args.save_strategy == "steps":
@@ -603,7 +680,12 @@ def main():
     
     # Add evaluation settings if validation dataset provided
     if val_dataset is not None:
-        grpo_config_dict["evaluation_strategy"] = args.evaluation_strategy
+        # Handle eval_strategy vs evaluation_strategy naming
+        if "eval_strategy" in supported_params:
+            grpo_config_dict["eval_strategy"] = args.evaluation_strategy
+        else:
+            grpo_config_dict["evaluation_strategy"] = args.evaluation_strategy
+        
         if args.evaluation_strategy == "steps":
             grpo_config_dict["eval_steps"] = args.eval_steps
         
@@ -612,12 +694,8 @@ def main():
             grpo_config_dict["metric_for_best_model"] = args.metric_for_best_model
             grpo_config_dict["greater_is_better"] = args.greater_is_better
     
-    # Try to add max_length/max_new_tokens if supported by GRPOConfig
-    sig = inspect.signature(GRPOConfig.__init__)
-    if 'max_length' in sig.parameters:
-        grpo_config_dict["max_length"] = args.max_length
-    if 'max_new_tokens' in sig.parameters:
-        grpo_config_dict["max_new_tokens"] = args.max_new_tokens
+    # Filter to only supported parameters
+    grpo_config_dict = {k: v for k, v in grpo_config_dict.items() if k in supported_params}
     
     # Create GRPOConfig
     grpo_config = GRPOConfig(**grpo_config_dict)
@@ -626,6 +704,9 @@ def main():
     print("GRPO CONFIGURATION")
     print("=" * 80)
     print(f"  num_generations: {args.num_generations}")
+    print(f"  max_prompt_length: {args.max_prompt_length}")
+    print(f"  max_completion_length: {args.max_completion_length}")
+    print(f"  use_vllm: False (using PyTorch generation)")
     print(f"  save_strategy: {args.save_strategy}")
     if args.save_strategy == "steps":
         print(f"  save_steps: {args.save_steps}")
@@ -635,11 +716,16 @@ def main():
         if args.load_best_model_at_end:
             print(f"  load_best_model_at_end: True")
             print(f"  metric_for_best_model: {args.metric_for_best_model}")
-    if 'max_length' in grpo_config_dict:
-        print(f"  max_length: {args.max_length}")
-    if 'max_new_tokens' in grpo_config_dict:
-        print(f"  max_new_tokens: {args.max_new_tokens}")
     print("=" * 80)
+    
+    # Clear memory before trainer initialization
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    # Switch to inference mode for generation (Unsloth-specific)
+    if UNSLOTH_AVAILABLE:
+        FastLanguageModel.for_inference(model)
     
     # Initialize trainer
     filter_epsilon = args.filter_epsilon if args.filter_epsilon is not None else None
@@ -654,8 +740,8 @@ def main():
     }
     
     # Try to add tokenizer if supported by GRPOTrainer
-    sig = inspect.signature(GRPOTrainer.__init__)
-    if 'tokenizer' in sig.parameters:
+    trainer_sig = inspect.signature(GRPOTrainer.__init__)
+    if "tokenizer" in trainer_sig.parameters:
         trainer_kwargs["tokenizer"] = tokenizer
     
     trainer = SRLGRPOTrainer(**trainer_kwargs)
@@ -663,6 +749,13 @@ def main():
     print("\n" + "=" * 80)
     print("STARTING TRAINING")
     print("=" * 80)
+    if torch.cuda.is_available():
+        print(f"GPU Memory before training: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
+    
+    # Switch to training mode (Unsloth-specific)
+    if UNSLOTH_AVAILABLE:
+        FastLanguageModel.for_training(model)
+    
     trainer.train()
     
     # Save final model
@@ -674,7 +767,7 @@ def main():
     tokenizer.save_pretrained(args.output_dir)
     
     print("\n" + "=" * 80)
-    print("✓ TRAINING COMPLETE!")
+    print("TRAINING COMPLETE!")
     print("=" * 80)
     if args.load_best_model_at_end and val_dataset:
         print(f"Best model (based on {args.metric_for_best_model}) has been loaded.")

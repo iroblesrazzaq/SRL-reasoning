@@ -3,8 +3,8 @@
 ## Setup Cell (Run First)
 
 ```python
-# Install dependencies
-!pip install -q bitsandbytes accelerate peft transformers trl datasets flash-attn --no-build-isolation
+# Install dependencies (using SDPA instead of flash-attn for faster setup)
+!pip install -q bitsandbytes accelerate peft transformers trl datasets
 
 # Clone repo (replace with your repo URL)
 !git clone https://github.com/yourusername/SRL-reasoning.git
