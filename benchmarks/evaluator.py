@@ -322,22 +322,73 @@ class MathEvaluator:
             )
         except AttributeError as e:
             if "'dict' object has no attribute 'model_type'" in str(e):
-                error_msg = (
-                    f"\n{'='*80}\n"
-                    f"ERROR: Tokenizer loading failed due to transformers/vLLM compatibility issue.\n"
-                    f"This is a known issue where transformers loads config as dict instead of config object.\n\n"
-                    f"WORKAROUNDS:\n"
-                    f"1. Load tokenizer from base model before benchmarking:\n"
-                    f"   from transformers import AutoTokenizer\n"
-                    f"   tokenizer = AutoTokenizer.from_pretrained('{base_model if base_model else 'BASE_MODEL_ID'}')\n"
-                    f"   tokenizer.save_pretrained('{model_path}')\n\n"
-                    f"2. Update/downgrade versions:\n"
-                    f"   !pip install transformers==4.40.0  # or compatible version\n"
-                    f"   !pip install vllm==0.4.0  # or compatible version\n\n"
-                    f"3. Use HuggingFace model ID instead of local path if available.\n"
-                    f"{'='*80}\n"
-                )
-                raise RuntimeError(error_msg) from e
+                # Try one more aggressive fix: clear transformers cache and reload
+                if base_model:
+                    print(f"\n⚠️  vLLM initialization failed. Attempting aggressive fix...")
+                    import sys
+                    import importlib
+                    
+                    # Clear transformers cache
+                    modules_to_clear = [
+                        'transformers.models.auto.configuration_auto',
+                        'transformers.models.auto.tokenization_auto',
+                        'transformers.configuration_utils',
+                        'transformers.tokenization_utils_base',
+                    ]
+                    for mod in modules_to_clear:
+                        if mod in sys.modules:
+                            del sys.modules[mod]
+                    
+                    # Force reload tokenizer/config one more time
+                    from transformers import AutoTokenizer, AutoConfig
+                    print(f"Force-reloading tokenizer/config from {base_model}...")
+                    base_tokenizer = AutoTokenizer.from_pretrained(
+                        base_model, 
+                        trust_remote_code=True,
+                        local_files_only=False
+                    )
+                    base_config = AutoConfig.from_pretrained(
+                        base_model, 
+                        trust_remote_code=True,
+                        local_files_only=False
+                    )
+                    base_tokenizer.save_pretrained(model_path)
+                    base_config.save_pretrained(model_path)
+                    print("✓ Tokenizer/config force-reloaded")
+                    
+                    # Try vLLM again
+                    try:
+                        self.llm = vllm.LLM(
+                            model=model_path,
+                            dtype="bfloat16",
+                            trust_remote_code=True,
+                            gpu_memory_utilization=gpu_memory_utilization,
+                        )
+                        print("✓ vLLM initialized successfully after fix!")
+                    except Exception as e2:
+                        error_msg = (
+                            f"\n{'='*80}\n"
+                            f"ERROR: Tokenizer loading failed due to transformers/vLLM compatibility issue.\n"
+                            f"This is a known issue where transformers loads config as dict instead of config object.\n\n"
+                            f"SOLUTION: Update transformers version:\n"
+                            f"  !pip install transformers>=4.40.0 --upgrade\n"
+                            f"  Then RESTART RUNTIME and try again.\n\n"
+                            f"Alternative: Use HuggingFace model ID instead of local path if available.\n"
+                            f"{'='*80}\n"
+                        )
+                        raise RuntimeError(error_msg) from e2
+                else:
+                    error_msg = (
+                        f"\n{'='*80}\n"
+                        f"ERROR: Tokenizer loading failed due to transformers/vLLM compatibility issue.\n"
+                        f"This is a known issue where transformers loads config as dict instead of config object.\n\n"
+                        f"SOLUTION: Update transformers version:\n"
+                        f"  !pip install transformers>=4.40.0 --upgrade\n"
+                        f"  Then RESTART RUNTIME and try again.\n\n"
+                        f"Alternative: Use HuggingFace model ID instead of local path if available.\n"
+                        f"{'='*80}\n"
+                    )
+                    raise RuntimeError(error_msg) from e
             raise
     
     def _get_prompt_template(self) -> str:
