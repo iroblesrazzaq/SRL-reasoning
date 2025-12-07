@@ -330,12 +330,19 @@ class MathEvaluator:
         
         try:
             print("Initializing vLLM engine (this may take a minute)...")
-            self.llm = vllm.LLM(
-                model=model_path,
-                dtype="bfloat16",
-                trust_remote_code=True,
-                gpu_memory_utilization=gpu_memory_utilization,
-            )
+            # Start with reduced max_model_len to save memory (4B model with default 262144 uses too much)
+            # 8192 is still plenty for math problems
+            vllm_kwargs = {
+                "model": model_path,
+                "dtype": "bfloat16",
+                "trust_remote_code": True,
+                "gpu_memory_utilization": gpu_memory_utilization,
+                "tensor_parallel_size": 1,  # Explicitly use single GPU
+                "max_model_len": 8192,  # Reduced from default 262144 to save memory
+            }
+            
+            print(f"  Using max_model_len={vllm_kwargs['max_model_len']} (reduced for memory efficiency)")
+            self.llm = vllm.LLM(**vllm_kwargs)
             print("✓ vLLM engine initialized successfully!")
         except RuntimeError as e:
             # Check if it's the engine initialization error
