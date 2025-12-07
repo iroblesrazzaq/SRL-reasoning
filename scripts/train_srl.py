@@ -5,20 +5,48 @@ SRL Training Script using TRL's GRPOTrainer.
 This script implements Step-wise Reinforcement Learning (SRL) using
 Group Relative Policy Optimization (GRPO) from the TRL library.
 
+Matches paper settings (2510.25992v1):
+- 30 epochs training
+- Epoch-based checkpoint saving
+- Best model selection based on eval_reward
+- Batch size 512 (via gradient accumulation)
+
 Usage:
     python scripts/train_srl.py --data_path data/srl_steps.jsonl --output_dir outputs/srl_model
 """
 
 import argparse
+import inspect
 import json
 import os
+from pathlib import Path
 from typing import List, Dict, Any
 
 import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import GRPOConfig, GRPOTrainer
 from peft import LoraConfig, TaskType, get_peft_model
+
+# Try to import GRPO - may require TRL from git
+try:
+    from trl import GRPOConfig, GRPOTrainer
+except ImportError:
+    # Try alternative import paths
+    try:
+        from trl.trainer.grpo_trainer import GRPOTrainer
+        from trl.trainer.grpo_config import GRPOConfig
+    except ImportError:
+        try:
+            from trl.trainer import GRPOTrainer
+            from trl.trainer.grpo_config import GRPOConfig
+        except ImportError:
+            raise ImportError(
+                "GRPOConfig and GRPOTrainer not found in TRL. "
+                "GRPO requires TRL from git. Install with:\n"
+                "  pip install git+https://github.com/huggingface/trl.git\n"
+                "Or in Colab:\n"
+                "  !pip install git+https://github.com/huggingface/trl.git"
+            )
 
 from src.srl.rewards import compute_srl_reward
 from src.srl.grpo_utils import dynamic_sampling_filter
@@ -187,7 +215,10 @@ class SRLGRPOTrainer(GRPOTrainer):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train SRL model using GRPO")
+    parser = argparse.ArgumentParser(
+        description="Train SRL model using GRPO (matches paper 2510.25992v1 settings)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     
     # Data arguments
     parser.add_argument(
@@ -196,12 +227,18 @@ def main():
         default="data/srl_steps.jsonl",
         help="Path to SRL training data (JSONL format)",
     )
+    parser.add_argument(
+        "--val_data_path",
+        type=str,
+        default=None,
+        help="Path to validation data (JSONL format). If provided, enables evaluation and best model selection.",
+    )
     
     # Model arguments
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Qwen/Qwen2.5-7B-Instruct",
+        default="Qwen/Qwen2.5-0.5B-Instruct",
         help="Base model to fine-tune",
     )
     parser.add_argument(
@@ -210,37 +247,43 @@ def main():
         default="outputs/srl_model",
         help="Directory to save trained model",
     )
+    parser.add_argument(
+        "--attn_implementation",
+        type=str,
+        default="sdpa",
+        help="Attention backend (e.g., flash_attention_2, sdpa, eager). Defaults to 'sdpa' (PyTorch built-in).",
+    )
     
-    # Training arguments
-    parser.add_argument(
-        "--num_generations",
-        type=int,
-        default=8,
-        help="Number of completions to generate per prompt (k in paper)",
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=1e-6,
-        help="Learning rate",
-    )
+    # Training arguments (matching paper defaults for 7B, adjusted for 0.5B)
     parser.add_argument(
         "--num_train_epochs",
         type=int,
-        default=1,
-        help="Number of training epochs",
+        default=30,
+        help="Number of training epochs (paper: 30)",
     )
     parser.add_argument(
         "--per_device_train_batch_size",
         type=int,
-        default=1,
-        help="Batch size per device",
+        default=16,
+        help="Batch size per device (paper: 8 for 7B/A100 80GB, increased to 16 for 0.5B)",
     )
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
-        default=16,
-        help="Gradient accumulation steps",
+        default=32,
+        help="Gradient accumulation steps (paper: 64 for 7B, reduced to 32 for 0.5B, total batch size = 16 * 32 = 512)",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=5e-7,
+        help="Learning rate (paper: 5e-7)",
+    )
+    parser.add_argument(
+        "--num_generations",
+        type=int,
+        default=8,
+        help="Number of completions to generate per prompt (k in paper, default: 8)",
     )
     parser.add_argument(
         "--max_length",
@@ -254,13 +297,89 @@ def main():
         default=512,
         help="Maximum new tokens to generate",
     )
+    parser.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=1.0,
+        help="Maximum gradient norm for clipping (paper: 1.0)",
+    )
+    parser.add_argument(
+        "--warmup_ratio",
+        type=float,
+        default=0.0,
+        help="Warmup ratio (paper: 0.0, no warmup)",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=0.0,
+        help="KL divergence coefficient (paper: 0.0 for SRL)",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Temperature for generation rollouts (paper: 1.0)",
+    )
     
     # Dynamic sampling arguments
     parser.add_argument(
         "--filter_epsilon",
         type=float,
         default=1e-4,
-        help="Epsilon threshold for dynamic sampling filter",
+        help="Epsilon threshold for dynamic sampling filter. Set to None or >= 1.0 to disable.",
+    )
+    
+    # Checkpoint and evaluation arguments (matching paper)
+    parser.add_argument(
+        "--save_strategy",
+        type=str,
+        default="epoch",
+        choices=["steps", "epoch", "no"],
+        help="Checkpoint save strategy (paper: 'epoch')",
+    )
+    parser.add_argument(
+        "--save_steps",
+        type=int,
+        default=500,
+        help="Save checkpoint every N steps (only used if save_strategy='steps')",
+    )
+    parser.add_argument(
+        "--save_total_limit",
+        type=int,
+        default=2,
+        help="Maximum number of checkpoints to keep (paper: 2, only last 2 kept)",
+    )
+    parser.add_argument(
+        "--evaluation_strategy",
+        type=str,
+        default="epoch",
+        choices=["no", "steps", "epoch"],
+        help="Evaluation strategy (paper: 'epoch', requires --val_data_path)",
+    )
+    parser.add_argument(
+        "--eval_steps",
+        type=int,
+        default=500,
+        help="Evaluate every N steps (only used if evaluation_strategy='steps')",
+    )
+    parser.add_argument(
+        "--load_best_model_at_end",
+        action="store_true",
+        default=True,
+        help="Load best model at end based on eval_reward (paper: True)",
+    )
+    parser.add_argument(
+        "--metric_for_best_model",
+        type=str,
+        default="eval_reward",
+        help="Metric for best model selection (paper: 'eval_reward')",
+    )
+    parser.add_argument(
+        "--greater_is_better",
+        action="store_true",
+        default=True,
+        help="Whether greater metric value is better (paper: True for reward)",
     )
     
     # Misc arguments
@@ -274,32 +393,13 @@ def main():
         "--bf16",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use bfloat16 precision (default: True, use --no-bf16 to disable)",
+        help="Use bfloat16 precision (paper: True, default: True)",
     )
     parser.add_argument(
         "--logging_steps",
         type=int,
-        default=10,
-        help="Log every N steps",
-    )
-    parser.add_argument(
-        "--save_steps",
-        type=int,
-        default=500,
-        help="Save checkpoint every N steps",
-    )
-    parser.add_argument(
-        "--save_strategy",
-        type=str,
-        default="steps",
-        choices=["steps", "epoch", "no"],
-        help="Checkpoint save strategy",
-    )
-    parser.add_argument(
-        "--save_total_limit",
-        type=int,
-        default=3,  # Safe default: only keep last 3 checkpoints
-        help="Maximum number of checkpoints to keep (older ones deleted)",
+        default=1,
+        help="Log every N steps (paper: 1)",
     )
     parser.add_argument(
         "--optim",
@@ -307,31 +407,51 @@ def main():
         default="adamw_8bit",
         help="Optimizer to use (e.g., adamw_8bit, adamw_torch)",
     )
+    parser.add_argument(
+        "--report_to",
+        type=str,
+        default="none",
+        help="Reporting backend (e.g., 'wandb', 'tensorboard', 'none')",
+    )
     
     args = parser.parse_args()
     
     # Set random seed
     torch.manual_seed(args.seed)
     
-    print(f"Loading model: {args.model_name}")
+    print("=" * 80)
+    print("SRL TRAINING WITH GRPO")
+    print("=" * 80)
+    print(f"Model: {args.model_name}")
+    print(f"Output: {args.output_dir}")
+    print(f"Epochs: {args.num_train_epochs}")
+    print(f"Batch size: {args.per_device_train_batch_size} * {args.gradient_accumulation_steps} = {args.per_device_train_batch_size * args.gradient_accumulation_steps}")
+    print(f"Learning rate: {args.learning_rate}")
+    print(f"Num generations (k): {args.num_generations}")
+    print("=" * 80)
     
     # Load tokenizer
+    print(f"\nLoading tokenizer: {args.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name,
         trust_remote_code=True,
-        padding_side="left",
+        padding_side="left",  # Left padding for generation
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
     # Load model
+    print(f"Loading model: {args.model_name}")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         torch_dtype=torch.bfloat16 if args.bf16 else torch.float32,
         trust_remote_code=True,
         device_map="auto",
+        attn_implementation=args.attn_implementation,
     )
+    
     # Apply LoRA
+    print("Applying LoRA...")
     lora_config = LoraConfig(
         r=16,
         lora_alpha=32,
@@ -344,8 +464,6 @@ def main():
     
     # Enable input gradients (required for training)
     model.enable_input_require_grads()
-    
-    # Set to training mode
     model.train()
     
     # Verify setup
@@ -359,17 +477,30 @@ def main():
         print(f"  Model device: {next(model.parameters()).device}")
         print(f"  GPU Memory: {torch.cuda.memory_allocated(0) / 1e9:.2f} GB")
     
-    print(f"Loading dataset from: {args.data_path}")
-    dataset = load_srl_dataset(args.data_path)
-    print(f"Loaded {len(dataset)} training examples")
+    # Load datasets
+    print(f"\nLoading training dataset: {args.data_path}")
+    train_dataset = load_srl_dataset(args.data_path)
+    print(f"  Loaded {len(train_dataset)} training examples")
+    
+    val_dataset = None
+    if args.val_data_path and Path(args.val_data_path).exists():
+        print(f"Loading validation dataset: {args.val_data_path}")
+        val_dataset = load_srl_dataset(args.val_data_path)
+        print(f"  Loaded {len(val_dataset)} validation examples")
+    elif args.val_data_path:
+        print(f"⚠️  Warning: Validation data path '{args.val_data_path}' not found. Disabling evaluation.")
+        args.evaluation_strategy = "no"
+        args.load_best_model_at_end = False
+    else:
+        print("  No validation dataset provided. Disabling evaluation.")
+        args.evaluation_strategy = "no"
+        args.load_best_model_at_end = False
     
     # Create reward function
     reward_fn = create_reward_function(tokenizer)
     
     # Configure GRPO training
-    # Note: GRPOConfig may not accept max_length or max_new_tokens
-    # These are typically handled by the trainer or vLLM internally
-    # Build config with only supported parameters
+    # Build config dict with paper-matching defaults
     grpo_config_dict = {
         "output_dir": args.output_dir,
         "num_train_epochs": args.num_train_epochs,
@@ -377,66 +508,101 @@ def main():
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "learning_rate": args.learning_rate,
         "logging_steps": args.logging_steps,
-        "save_steps": args.save_steps,
         "save_strategy": args.save_strategy,
         "save_total_limit": args.save_total_limit,
         "optim": args.optim,
         "bf16": args.bf16,
         "seed": args.seed,
-        "num_generations": args.num_generations,  # k rollouts per prompt
-        "report_to": "none",  # Disable wandb/tensorboard by default for non-interactive runs
+        "num_generations": args.num_generations,
+        "report_to": args.report_to,
+        "max_grad_norm": args.max_grad_norm,
+        "warmup_ratio": args.warmup_ratio,
+        "beta": args.beta,
+        "temperature": args.temperature,
     }
     
-    # Try to add max_length if supported
-    import inspect
+    # Add save_steps if using step-based saving
+    if args.save_strategy == "steps":
+        grpo_config_dict["save_steps"] = args.save_steps
+    
+    # Add evaluation settings if validation dataset provided
+    if val_dataset is not None:
+        grpo_config_dict["evaluation_strategy"] = args.evaluation_strategy
+        if args.evaluation_strategy == "steps":
+            grpo_config_dict["eval_steps"] = args.eval_steps
+        
+        if args.load_best_model_at_end:
+            grpo_config_dict["load_best_model_at_end"] = True
+            grpo_config_dict["metric_for_best_model"] = args.metric_for_best_model
+            grpo_config_dict["greater_is_better"] = args.greater_is_better
+    
+    # Try to add max_length/max_new_tokens if supported by GRPOConfig
     sig = inspect.signature(GRPOConfig.__init__)
     if 'max_length' in sig.parameters:
         grpo_config_dict["max_length"] = args.max_length
     if 'max_new_tokens' in sig.parameters:
         grpo_config_dict["max_new_tokens"] = args.max_new_tokens
     
+    # Create GRPOConfig
     grpo_config = GRPOConfig(**grpo_config_dict)
     
-    print("Initializing GRPO Trainer...")
+    print("\n" + "=" * 80)
+    print("GRPO CONFIGURATION")
+    print("=" * 80)
     print(f"  num_generations: {args.num_generations}")
+    print(f"  save_strategy: {args.save_strategy}")
+    if args.save_strategy == "steps":
+        print(f"  save_steps: {args.save_steps}")
+    print(f"  save_total_limit: {args.save_total_limit}")
+    if val_dataset:
+        print(f"  evaluation_strategy: {args.evaluation_strategy}")
+        if args.load_best_model_at_end:
+            print(f"  load_best_model_at_end: True")
+            print(f"  metric_for_best_model: {args.metric_for_best_model}")
     if 'max_length' in grpo_config_dict:
         print(f"  max_length: {args.max_length}")
     if 'max_new_tokens' in grpo_config_dict:
         print(f"  max_new_tokens: {args.max_new_tokens}")
-    if 'max_length' not in grpo_config_dict and 'max_new_tokens' not in grpo_config_dict:
-        print(f"  Note: Generation length controlled by vLLM defaults")
+    print("=" * 80)
     
-    # Initialize trainer with dynamic sampling
-    # Note: GRPOTrainer may not accept tokenizer directly
-    # It may extract it from the model or config
-    # Handle filter_epsilon: allow None to disable filtering
+    # Initialize trainer
     filter_epsilon = args.filter_epsilon if args.filter_epsilon is not None else None
     
     trainer_kwargs = {
         "model": model,
         "args": grpo_config,
-        "train_dataset": dataset,
+        "train_dataset": train_dataset,
+        "eval_dataset": val_dataset,
         "reward_funcs": reward_fn,
-        "filter_epsilon": filter_epsilon,  # For SRLGRPOTrainer
+        "filter_epsilon": filter_epsilon,
     }
     
     # Try to add tokenizer if supported by GRPOTrainer
-    import inspect
     sig = inspect.signature(GRPOTrainer.__init__)
     if 'tokenizer' in sig.parameters:
         trainer_kwargs["tokenizer"] = tokenizer
     
     trainer = SRLGRPOTrainer(**trainer_kwargs)
     
-    print("Starting training...")
+    print("\n" + "=" * 80)
+    print("STARTING TRAINING")
+    print("=" * 80)
     trainer.train()
     
     # Save final model
-    print(f"Saving model to: {args.output_dir}")
+    print("\n" + "=" * 80)
+    print("SAVING MODEL")
+    print("=" * 80)
+    print(f"Saving to: {args.output_dir}")
     trainer.save_model(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     
-    print("Training complete!")
+    print("\n" + "=" * 80)
+    print("✓ TRAINING COMPLETE!")
+    print("=" * 80)
+    if args.load_best_model_at_end and val_dataset:
+        print(f"Best model (based on {args.metric_for_best_model}) has been loaded.")
+    print(f"Model saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":
