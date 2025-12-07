@@ -303,8 +303,8 @@ def main():
     parser.add_argument(
         "--num_generations",
         type=int,
-        default=1,
-        help="Number of completions to generate per prompt (k in paper, default: 8, reduced to 1 for memory - can accumulate over steps)",
+        default=2,
+        help="Number of completions to generate per prompt (k in paper, default: 8, minimum: 2 for GRPO variance calculation)",
     )
     parser.add_argument(
         "--max_length",
