@@ -205,6 +205,10 @@ class SRLGRPOTrainer(GRPOTrainer):
         """
         loss = super().training_step(model, inputs, num_items_in_batch)
         
+        # Clear CUDA cache after each step to prevent memory buildup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         # Log filtering statistics after each step
         if self._last_filter_stats["total"] > 0:
             kept_ratio = self._last_filter_stats["kept"] / self._last_filter_stats["total"]
@@ -510,6 +514,11 @@ def main():
     
     # Disable cache during training to save memory
     model.config.use_cache = False
+    
+    # Clear CUDA cache to free up memory after model loading
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
     
     model.train()
     
