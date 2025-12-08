@@ -123,6 +123,9 @@ def create_reward_function(tokenizer):
     Returns:
         A callable compatible with TRL v0.25.1's reward function API.
     """
+    # Track call count for verification logging
+    call_stats = {"count": 0, "total_rewards": 0.0, "format_errors": 0}
+    
     def reward_fn(completions: List[str], expert_target: List[str], **kwargs) -> List[float]:
         """
         Compute rewards for a batch of completions.
@@ -147,6 +150,22 @@ def create_reward_function(tokenizer):
         for completion, target in zip(completions, expert_target):
             reward = compute_srl_reward(completion, target)
             rewards.append(reward)
+            
+            # Track statistics
+            call_stats["total_rewards"] += reward
+            if reward == -1.0:
+                call_stats["format_errors"] += 1
+        
+        call_stats["count"] += 1
+        
+        # Log every 10 calls to verify reward function is being used
+        if call_stats["count"] % 10 == 0:
+            n_samples = call_stats["count"] * len(completions)
+            avg_reward = call_stats["total_rewards"] / n_samples if n_samples > 0 else 0
+            print(f"  [Reward fn] calls={call_stats['count']}, "
+                  f"samples={n_samples}, avg_reward={avg_reward:.4f}, "
+                  f"format_errors={call_stats['format_errors']}")
+        
         return rewards
     
     return reward_fn
@@ -154,20 +173,26 @@ def create_reward_function(tokenizer):
 
 class SRLGRPOTrainer(GRPOTrainer):
     """
-    Custom GRPO Trainer with dynamic sampling filter.
+    Custom GRPO Trainer with dynamic sampling filter and reward-based evaluation.
     
-    This extends TRL's GRPOTrainer to filter out samples
-    where reward variance is near zero (too hard or too easy),
-    as they provide weak learning signals.
+    This extends TRL's GRPOTrainer to:
+    1. Filter out samples where reward variance is near zero (too hard or too easy),
+       as they provide weak learning signals.
+    2. Compute eval_reward during evaluation by generating completions and
+       computing rewards on the validation set.
     
     The filtering is applied at the advantage computation stage,
     where we have access to per-prompt reward distributions.
     """
     
     def __init__(self, *args, filter_epsilon: float = 1e-4, **kwargs):
+        # Capture reward function before passing to super (it gets consumed)
+        reward_fn = kwargs.get("reward_funcs", None)
         super().__init__(*args, **kwargs)
         self.filter_epsilon = filter_epsilon
         self._last_filter_stats = {"kept": 0, "total": 0}
+        # Store reward function for evaluation (may be in self.reward_funcs after super)
+        self._reward_fn = reward_fn or getattr(self, "reward_funcs", None)
     
     def _compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         """
@@ -241,6 +266,116 @@ class SRLGRPOTrainer(GRPOTrainer):
             })
         
         return loss
+    
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        """
+        Override evaluate to compute rewards on validation set.
+        
+        This generates completions for validation prompts and computes
+        the mean reward, which is used for best model selection.
+        """
+        eval_dataset = eval_dataset or self.eval_dataset
+        if eval_dataset is None:
+            return {}
+        
+        print(f"\n{'='*60}")
+        print("EVALUATION: Computing rewards on validation set...")
+        print(f"{'='*60}")
+        
+        # Put model in eval mode
+        self.model.eval()
+        
+        all_rewards = []
+        eval_samples = min(len(eval_dataset), 50)  # Limit for speed
+        
+        # Sample subset for evaluation (full set is slow)
+        if len(eval_dataset) > eval_samples:
+            import random
+            indices = random.sample(range(len(eval_dataset)), eval_samples)
+            eval_subset = eval_dataset.select(indices)
+        else:
+            eval_subset = eval_dataset
+        
+        print(f"Evaluating on {len(eval_subset)} samples...")
+        
+        # Generate completions and compute rewards
+        with torch.no_grad():
+            for i, example in enumerate(eval_subset):
+                prompt = example["prompt"]
+                expert_target = example["expert_target"]
+                
+                # Tokenize prompt
+                inputs = self.processing_class(
+                    prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512,
+                ).to(self.model.device)
+                
+                # Generate completion (greedy for eval)
+                try:
+                    outputs = self.model.generate(
+                        **inputs,
+                        max_new_tokens=256,
+                        do_sample=False,
+                        pad_token_id=self.processing_class.pad_token_id,
+                        eos_token_id=self.processing_class.eos_token_id,
+                    )
+                    
+                    # Decode only the generated part
+                    completion = self.processing_class.decode(
+                        outputs[0][inputs["input_ids"].shape[1]:],
+                        skip_special_tokens=True,
+                    )
+                    
+                    # Compute reward
+                    if callable(self._reward_fn):
+                        rewards = self._reward_fn(
+                            completions=[completion],
+                            expert_target=[expert_target],
+                        )
+                        reward = rewards[0]
+                    else:
+                        # Fallback to compute_srl_reward directly
+                        from src.srl.rewards import compute_srl_reward
+                        reward = compute_srl_reward(completion, expert_target)
+                    
+                    all_rewards.append(reward)
+                    
+                    if (i + 1) % 10 == 0:
+                        print(f"  Evaluated {i+1}/{len(eval_subset)}, running avg reward: {sum(all_rewards)/len(all_rewards):.4f}")
+                
+                except Exception as e:
+                    print(f"  Warning: Failed on sample {i}: {e}")
+                    continue
+        
+        # Compute mean reward
+        if all_rewards:
+            mean_reward = sum(all_rewards) / len(all_rewards)
+        else:
+            mean_reward = 0.0
+        
+        # Put model back in train mode
+        self.model.train()
+        
+        metrics = {
+            f"{metric_key_prefix}_reward": mean_reward,
+            f"{metric_key_prefix}_reward_samples": len(all_rewards),
+        }
+        
+        print(f"\n{'='*60}")
+        print(f"EVALUATION COMPLETE: mean reward = {mean_reward:.4f} ({len(all_rewards)} samples)")
+        print(f"{'='*60}\n")
+        
+        # Log metrics
+        self.log(metrics)
+        
+        # Clear cache after evaluation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        return metrics
 
 
 def load_model(model_name: str, bf16: bool, attn_implementation: str, use_8bit: bool):
