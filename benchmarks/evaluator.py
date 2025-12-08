@@ -335,27 +335,49 @@ class MathEvaluator:
         model_dir = Path(model_path)
         config_path = model_dir / "config.json"
         
+        print("=" * 80)
+        print("MODIFYING MODEL CONFIG FOR MEMORY EFFICIENCY")
+        print("=" * 80)
+        print(f"DEBUG: model_path = {model_path}")
+        print(f"DEBUG: config_path = {config_path}")
+        print(f"DEBUG: config_path.exists() = {config_path.exists()}")
+        
         if config_path.exists():
             # Read and modify config
             with open(config_path, 'r') as f:
                 config = json.load(f)
             
-            original_max_len = config.get("max_position_embeddings", config.get("model_max_length", None))
-            if original_max_len and original_max_len > 8192:
-                print(f"⚠️  Model config has max_position_embeddings={original_max_len}")
-                print(f"   Temporarily reducing to 8192 for memory efficiency...")
-                # Save original for restoration later
-                config["_original_max_position_embeddings"] = original_max_len
-                config["max_position_embeddings"] = 8192
-                # Also set model_max_length if it exists
-                if "model_max_length" in config:
-                    config["_original_model_max_length"] = config["model_max_length"]
-                    config["model_max_length"] = 8192
-                
+            # Check all possible max length fields
+            max_len_fields = ["max_position_embeddings", "model_max_length", "max_seq_length"]
+            original_values = {}
+            
+            for field in max_len_fields:
+                if field in config:
+                    original_values[field] = config[field]
+                    if config[field] and config[field] > 8192:
+                        print(f"  Found {field}={config[field]}")
+                        config[f"_original_{field}"] = config[field]
+                        config[field] = 8192
+                        print(f"  → Reduced to 8192")
+            
+            # Also check for max_model_len in config (some models have this)
+            if "max_model_len" in config and config["max_model_len"] > 8192:
+                original_values["max_model_len"] = config["max_model_len"]
+                config["_original_max_model_len"] = config["max_model_len"]
+                config["max_model_len"] = 8192
+                print(f"  Found max_model_len={original_values['max_model_len']} → Reduced to 8192")
+            
+            if original_values:
                 # Write modified config
                 with open(config_path, 'w') as f:
                     json.dump(config, f, indent=2)
-                print(f"✓ Config modified: max_position_embeddings=8192")
+                print(f"✓ Config modified and saved")
+            else:
+                print("  No large max length fields found (already <= 8192)")
+        else:
+            print(f"⚠️  Config file not found: {config_path}")
+        
+        print("=" * 80)
         
         try:
             print("Initializing vLLM engine (this may take a minute)...")
@@ -371,8 +393,29 @@ class MathEvaluator:
             }
             
             print(f"  Using max_model_len={vllm_kwargs['max_model_len']} (reduced for memory efficiency)")
-            self.llm = vllm.LLM(**vllm_kwargs)
-            print("✓ vLLM engine initialized successfully!")
+            print(f"  Model path: {model_path}")
+            print(f"  GPU memory utilization: {gpu_memory_utilization}")
+            
+            # Try to capture stderr from vLLM initialization
+            import sys
+            import io
+            old_stderr = sys.stderr
+            stderr_capture = io.StringIO()
+            try:
+                sys.stderr = stderr_capture
+                self.llm = vllm.LLM(**vllm_kwargs)
+                sys.stderr = old_stderr
+                print("✓ vLLM engine initialized successfully!")
+            except Exception as e:
+                sys.stderr = old_stderr
+                stderr_output = stderr_capture.getvalue()
+                if stderr_output:
+                    print("\n" + "=" * 80)
+                    print("CAPTURED STDERR FROM vLLM:")
+                    print("=" * 80)
+                    print(stderr_output)
+                    print("=" * 80)
+                raise
         except RuntimeError as e:
             # Check if it's the engine initialization error
             if "Engine core initialization failed" in str(e):
