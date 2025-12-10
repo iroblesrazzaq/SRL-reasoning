@@ -68,7 +68,11 @@ except ImportError:
                 "  !pip install git+https://github.com/huggingface/trl.git"
             )
 
-from src.srl.rewards import compute_srl_reward
+from src.srl.rewards import (
+    compute_srl_reward,
+    compute_combined_reward_batch,
+    EmbeddingRewardModel,
+)
 from src.srl.grpo_utils import dynamic_sampling_filter
 from src.shared.prompts import format_srl_prompt
 
@@ -110,21 +114,63 @@ def load_srl_dataset(data_path: str) -> Dataset:
     return Dataset.from_list(processed)
 
 
-def create_reward_function(tokenizer):
+def create_reward_function(
+    tokenizer,
+    string_weight: float = 1.0,
+    cosine_weight: float = 0.0,
+    embedding_model_name: str = "Qwen/Qwen3-Embedding-0.6B",
+):
     """
     Create a reward function wrapper for GRPO training.
     
-    The reward function computes sequence similarity between
-    the model's completion and the expert target.
+    The reward function computes a weighted combination of:
+    - String similarity (difflib SequenceMatcher)
+    - Cosine similarity (using text embeddings)
     
     Args:
         tokenizer: The tokenizer (used for decoding if needed).
+        string_weight: Weight for string similarity reward (default: 1.0).
+        cosine_weight: Weight for cosine similarity reward (default: 0.0).
+        embedding_model_name: HuggingFace model name for embeddings.
         
     Returns:
         A callable compatible with TRL v0.25.1's reward function API.
     """
     # Track call count for verification logging
-    call_stats = {"count": 0, "total_rewards": 0.0, "format_errors": 0}
+    call_stats = {
+        "count": 0,
+        "total_rewards": 0.0,
+        "format_errors": 0,
+        "total_string_sim": 0.0,
+        "total_cosine_sim": 0.0,
+        "valid_samples": 0,
+    }
+    
+    # Normalize weights
+    total_weight = string_weight + cosine_weight
+    if total_weight <= 0:
+        raise ValueError("string_weight + cosine_weight must be > 0")
+    norm_string_weight = string_weight / total_weight
+    norm_cosine_weight = cosine_weight / total_weight
+    
+    print(f"\n{'='*60}")
+    print("REWARD FUNCTION CONFIGURATION")
+    print(f"{'='*60}")
+    print(f"  String similarity weight: {norm_string_weight:.2f}")
+    print(f"  Cosine similarity weight: {norm_cosine_weight:.2f}")
+    
+    # Load embedding model only if cosine similarity is used
+    embedding_model = None
+    if cosine_weight > 0:
+        print(f"  Loading embedding model: {embedding_model_name}")
+        embedding_model = EmbeddingRewardModel(
+            model_name=embedding_model_name,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+            use_fp16=True,
+        )
+    else:
+        print("  Embedding model: Not loaded (cosine_weight=0)")
+    print(f"{'='*60}\n")
     
     def reward_fn(completions: List[str], expert_target: List[str], **kwargs) -> List[float]:
         """
@@ -146,25 +192,42 @@ def create_reward_function(tokenizer):
         Returns:
             List of reward values.
         """
-        rewards = []
-        for completion, target in zip(completions, expert_target):
-            reward = compute_srl_reward(completion, target)
-            rewards.append(reward)
-            
-            # Track statistics
-            call_stats["total_rewards"] += reward
-            if reward == -1.0:
-                call_stats["format_errors"] += 1
+        # Use combined reward computation for batch processing
+        rewards, stats = compute_combined_reward_batch(
+            completions=completions,
+            expert_targets=expert_target,
+            embedding_model=embedding_model,
+            string_weight=norm_string_weight,
+            cosine_weight=norm_cosine_weight,
+        )
         
+        # Track statistics
         call_stats["count"] += 1
+        call_stats["total_rewards"] += sum(rewards)
+        call_stats["format_errors"] += stats["format_errors"]
+        
+        # Track component similarities for valid samples
+        valid_in_batch = len(completions) - stats["format_errors"]
+        if valid_in_batch > 0:
+            call_stats["valid_samples"] += valid_in_batch
+            call_stats["total_string_sim"] += stats["avg_string_sim"] * valid_in_batch
+            call_stats["total_cosine_sim"] += stats["avg_cosine_sim"] * valid_in_batch
         
         # Log every 10 calls to verify reward function is being used
         if call_stats["count"] % 10 == 0:
             n_samples = call_stats["count"] * len(completions)
             avg_reward = call_stats["total_rewards"] / n_samples if n_samples > 0 else 0
-            print(f"  [Reward fn] calls={call_stats['count']}, "
-                  f"samples={n_samples}, avg_reward={avg_reward:.4f}, "
-                  f"format_errors={call_stats['format_errors']}")
+            avg_string = call_stats["total_string_sim"] / call_stats["valid_samples"] if call_stats["valid_samples"] > 0 else 0
+            avg_cosine = call_stats["total_cosine_sim"] / call_stats["valid_samples"] if call_stats["valid_samples"] > 0 else 0
+            
+            log_msg = (f"  [Reward fn] calls={call_stats['count']}, "
+                      f"samples={n_samples}, avg_reward={avg_reward:.4f}, "
+                      f"format_errors={call_stats['format_errors']}")
+            if norm_string_weight > 0:
+                log_msg += f", avg_string_sim={avg_string:.4f}"
+            if norm_cosine_weight > 0:
+                log_msg += f", avg_cosine_sim={avg_cosine:.4f}"
+            print(log_msg)
         
         return rewards
     
@@ -595,6 +658,26 @@ def main():
         help="Epsilon threshold for dynamic sampling filter. Set to None or >= 1.0 to disable.",
     )
     
+    # Reward function arguments
+    parser.add_argument(
+        "--string_weight",
+        type=float,
+        default=1.0,
+        help="Weight for string similarity reward (default: 1.0). Set to 0 to disable.",
+    )
+    parser.add_argument(
+        "--cosine_weight",
+        type=float,
+        default=0.0,
+        help="Weight for cosine similarity reward (default: 0.0). Set > 0 to enable embedding-based reward.",
+    )
+    parser.add_argument(
+        "--embedding_model",
+        type=str,
+        default="Qwen/Qwen3-Embedding-0.6B",
+        help="HuggingFace model name for text embeddings (used when cosine_weight > 0).",
+    )
+    
     # Checkpoint and evaluation arguments (matching paper)
     parser.add_argument(
         "--save_strategy",
@@ -701,6 +784,11 @@ def main():
     print(f"use_vllm: {use_vllm}")
     if use_vllm:
         print(f"vllm_gpu_memory_utilization: {args.vllm_gpu_memory_utilization}")
+    # Reward weights
+    total_weight = args.string_weight + args.cosine_weight
+    print(f"Reward weights: string={args.string_weight/total_weight:.2f}, cosine={args.cosine_weight/total_weight:.2f}")
+    if args.cosine_weight > 0:
+        print(f"Embedding model: {args.embedding_model}")
     print("=" * 80)
     
     # Load model and tokenizer
@@ -742,7 +830,12 @@ def main():
         args.load_best_model_at_end = False
     
     # Create reward function
-    reward_fn = create_reward_function(tokenizer)
+    reward_fn = create_reward_function(
+        tokenizer=tokenizer,
+        string_weight=args.string_weight,
+        cosine_weight=args.cosine_weight,
+        embedding_model_name=args.embedding_model,
+    )
     
     # Configure GRPO training
     # Check which parameter names are supported
